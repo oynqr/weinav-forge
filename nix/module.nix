@@ -97,12 +97,18 @@ let
         -p ${toString cfg.compression.threads} -c "${file}" > "${file}.gz"
       ${cfg.compression.gzip.package}/bin/pigz -d -c "${file}.gz" > "$stage/gzip-roundtrip"
       cmp "${file}" "$stage/gzip-roundtrip"
+      if [ "$(stat -c %s "${file}.gz")" -ge "$(stat -c %s "${file}")" ]; then
+        rm -- "${file}.gz"
+      fi
     ''}
     ${lib.optionalString cfg.compression.brotli.enable ''
       ${cfg.compression.brotli.package}/bin/brotli -q ${toString cfg.compression.brotli.quality} \
         -c "${file}" > "${file}.br"
       ${cfg.compression.brotli.package}/bin/brotli -d -c "${file}.br" > "$stage/brotli-roundtrip"
       cmp "${file}" "$stage/brotli-roundtrip"
+      if [ "$(stat -c %s "${file}.br")" -ge "$(stat -c %s "${file}")" ]; then
+        rm -- "${file}.br"
+      fi
     ''}
   '';
   buildOne =
@@ -270,6 +276,13 @@ let
         mkdir -p ${quote "${cfg.outputDirectory}/${name}/.generations"}
         find ${quote "${cfg.outputDirectory}/${name}/.generations"} -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -exec rm -rf -- {} +
         find ${quote "${cfg.outputDirectory}/${name}"} -maxdepth 1 -type l -name '.current-*' -delete
+        while IFS= read -r -d $'\0' sidecar; do
+          original=''${sidecar%.*}
+          if [ -f "$original" ] && [ "$(stat -c %s "$sidecar")" -ge "$(stat -c %s "$original")" ]; then
+            rm -- "$sidecar"
+          fi
+        done < <(find ${quote "${cfg.outputDirectory}/${name}/.generations"} -type f \
+          \( -name '*.gz' -o -name '*.br' \) -print0)
       '') (names ++ [ ".manifest" ])}
       failed=0
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList buildOne instances)}
@@ -507,7 +520,7 @@ in
         enable = mkOption {
           type = types.bool;
           default = true;
-          description = "Publish a gzip sidecar.";
+          description = "Publish gzip sidecars when they are smaller than the original files.";
         };
         level = mkOption {
           type = types.ints.between 1 9;
@@ -520,7 +533,7 @@ in
         enable = mkOption {
           type = types.bool;
           default = true;
-          description = "Publish a Brotli sidecar.";
+          description = "Publish Brotli sidecars when they are smaller than the original files.";
         };
         quality = mkOption {
           type = types.ints.between 0 11;

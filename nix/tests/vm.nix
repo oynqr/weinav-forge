@@ -66,10 +66,22 @@ let
     name: package:
     pkgs.writeShellApplication {
       inherit name;
+      runtimeInputs = [ pkgs.coreutils ];
       text = ''
         source=''${!#}
         if [ -f ${cache}/fail-compression ]; then exit 1; fi
         if [ -f ${cache}/fail-manifest-compression ] && [[ "$source" = */manifest.json ]]; then exit 1; fi
+        if [ -f ${cache}/compression-size ]; then
+          if [ "$1" = -d ]; then
+            cat "''${source%.*}"
+          else
+            cat "$source"
+            if [ "$(cat ${cache}/compression-size)" = larger ]; then
+              printf padding
+            fi
+          fi
+          exit 0
+        fi
         exec ${package}/bin/${name} "$@"
       '';
     };
@@ -212,16 +224,18 @@ pkgs.testers.runNixOSTest {
             ("/agnss/manifest.json", "${public}/manifest.json", "application/json"),
         ]:
             for encoding, suffix, command in [("identity", "", "cat"), ("gzip", ".gz", "pigz -dc"), ("br", ".br", "brotli -dc")]:
+                exists = encoding != "identity" and machine.execute(f"test -f {path}{suffix}")[0] == 0
                 machine.succeed(f"curl -fsS -D /tmp/headers -H 'Accept-Encoding: {encoding}' http://localhost{url} -o /tmp/encoded")
                 headers = machine.succeed("cat /tmp/headers").lower()
                 assert f"content-type: {mime}" in headers
                 assert "cache-control: no-store" in headers
                 assert "vary: accept-encoding" in headers
-                if encoding != "identity":
-                    machine.succeed(f"test -f {path}{suffix}")
+                if exists:
                     assert f"content-encoding: {encoding}" in headers
+                    assert int(machine.succeed(f"stat -Lc %s {path}{suffix}")) < int(machine.succeed(f"stat -Lc %s {path}"))
                 else:
                     assert "content-encoding:" not in headers
+                    command = "cat"
                 machine.succeed(f"{command} /tmp/encoded > /tmp/decoded; cmp /tmp/decoded {path}")
         check_manifest()
 
@@ -324,6 +338,22 @@ pkgs.testers.runNixOSTest {
     assert int(machine.succeed("cat ${cache}/fetch-uid")) >= 61184
     assert int(machine.succeed("cat ${state}/build-uid")) >= 61184
     check_encodings()
+
+    for size in ["equal", "larger"]:
+        machine.succeed(f"printf {size} > ${cache}/compression-size; systemctl start weinav-forge-build")
+        for path in ["${public}/watch/current/ephemeris.zip", "${public}/secondary/current/ephemeris.zip", "${public}/manifest.json"]:
+            machine.fail(f"test -e {path}.gz")
+            machine.fail(f"test -e {path}.br")
+        check_encodings()
+    machine.succeed("rm ${cache}/compression-size; systemctl start weinav-forge-build")
+    check_encodings()
+
+    machine.succeed("cp ${public}/watch/current/ephemeris.zip ${public}/watch/current/ephemeris.zip.gz; cp ${public}/watch/current/ephemeris.zip ${public}/watch/current/ephemeris.zip.br; touch ${cache}/fail-process")
+    machine.fail("systemctl start weinav-forge-build")
+    machine.fail("test -e ${public}/watch/current/ephemeris.zip.gz")
+    machine.fail("test -e ${public}/watch/current/ephemeris.zip.br")
+    check_encodings()
+    machine.succeed("rm ${cache}/fail-process; systemctl reset-failed weinav-forge-build")
 
     previous_manifest = check_manifest()
     secondary = previous_manifest["variants"][0]

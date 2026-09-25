@@ -149,6 +149,10 @@ the published directory or read cache files and reports.
 
 Each build first writes private staging files. It then makes gzip and Brotli
 sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
+It keeps a sidecar only if its size is less than the original file size.
+An equal or larger sidecar is deleted. Each run also removes such sidecars
+from earlier publications. Nginx uses the original file when a requested
+sidecar is absent. Both ZIP files and the discovery manifest use this rule.
 The completed set moves to a generation directory on the output filesystem.
 A single atomic link replacement publishes the set.
 
