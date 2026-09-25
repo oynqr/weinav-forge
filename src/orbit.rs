@@ -41,8 +41,13 @@ struct Orbit {
     earth_rate: f64,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct Geometry {
     dt: f64,
+    twice_phi: f64,
+    argument: f64,
+    inclination: f64,
+    node: f64,
     sin_e: f64,
     cos_e: f64,
     denominator: f64,
@@ -57,6 +62,17 @@ struct Geometry {
     xp: f64,
     yp: f64,
     position: [f64; 3],
+}
+
+#[inline(always)]
+fn sin_cos_cached(angle: f64, cached: Option<(f64, (f64, f64))>) -> (f64, f64) {
+    if let Some((previous, values)) = cached
+        && angle.to_bits() == previous.to_bits()
+    {
+        values
+    } else {
+        angle.sin_cos()
+    }
 }
 
 impl Orbit {
@@ -77,7 +93,7 @@ impl Orbit {
     }
 
     #[inline(always)]
-    fn geometry(&self, dt: f64, toe: f64, geo: bool) -> Geometry {
+    fn geometry(&self, dt: f64, toe: f64, geo: bool, cached: Option<&Geometry>) -> Geometry {
         let [
             _,
             ecc,
@@ -98,31 +114,44 @@ impl Orbit {
         let n = self.unperturbed_motion + dn;
         let mean = angle(m0 + n * dt);
         let mut eccentric = mean;
+        let (mut sin_e, mut cos_e) = eccentric.sin_cos();
         for _ in 0..20 {
-            let (sin_e, cos_e) = eccentric.sin_cos();
             let delta = (eccentric - ecc * sin_e - mean) / (1.0 - ecc * cos_e);
+            let previous = eccentric;
             eccentric -= delta;
+            if eccentric.to_bits() != previous.to_bits() {
+                (sin_e, cos_e) = eccentric.sin_cos();
+            }
             if delta.abs() < 1e-14 {
                 break;
             }
         }
-        let (sin_e, cos_e) = eccentric.sin_cos();
         let denominator = 1.0 - ecc * cos_e;
         let anomaly = (self.eccentricity_scale * sin_e).atan2(cos_e - ecc);
         let phi = anomaly + omega;
-        let (s2, c2) = (2.0 * phi).sin_cos();
+        let twice_phi = 2.0 * phi;
+        let (s2, c2) = sin_cos_cached(twice_phi, cached.map(|g| (g.twice_phi, (g.s2, g.c2))));
         let argument = phi + cuc * c2 + cus * s2;
         let radius = self.semi_major * denominator + crc * c2 + crs * s2;
         let inclination = i0 + idot * dt + cic * c2 + cis * s2;
         let node =
             omega0 + (omd - if geo { 0.0 } else { self.earth_rate }) * dt - self.earth_rate * toe;
-        let (sin_u, cos_u) = argument.sin_cos();
-        let (sin_i, cos_i) = inclination.sin_cos();
-        let (sin_node, cos_node) = node.sin_cos();
+        let (sin_u, cos_u) =
+            sin_cos_cached(argument, cached.map(|g| (g.argument, (g.sin_u, g.cos_u))));
+        let (sin_i, cos_i) = sin_cos_cached(
+            inclination,
+            cached.map(|g| (g.inclination, (g.sin_i, g.cos_i))),
+        );
+        let (sin_node, cos_node) =
+            sin_cos_cached(node, cached.map(|g| (g.node, (g.sin_node, g.cos_node))));
         let xp = radius * cos_u;
         let yp = radius * sin_u;
         Geometry {
             dt,
+            twice_phi,
+            argument,
+            inclination,
+            node,
             sin_e,
             cos_e,
             denominator,
@@ -147,7 +176,7 @@ impl Orbit {
 
 pub fn position(p: &Parameters, dt: f64, toe: f64, system: System, geo: bool) -> Result<[f64; 3]> {
     let orbit = Orbit::new(*p, system)?;
-    let [x, y, z] = orbit.geometry(dt, toe, geo).position;
+    let [x, y, z] = orbit.geometry(dt, toe, geo, None).position;
     if geo {
         let (s, c) = (-5_f64.to_radians()).sin_cos();
         let y1 = y * c + z * s;
@@ -273,6 +302,7 @@ fn jacobian_simd<S: Simd>(
             xp,
             yp,
             position: [x, y, _],
+            ..
         },
     ) in samples.iter().enumerate()
     {
@@ -368,13 +398,17 @@ pub fn fit(
     let steps: [f64; 15] = [
         1e-5, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1e-13, 1e-13, 1e-13, 1e-9, 1e-9, 1e-9, 1e-9, 1e-4, 1e-4,
     ];
-    let residual = |u: Parameters| -> Result<(DVector<f64>, Orbit, Vec<Geometry>)> {
-        let p = from_regular(u);
+    let residual = |p: Parameters,
+                    cached: Option<&[Geometry]>|
+     -> Result<(DVector<f64>, Orbit, Vec<Geometry>)> {
         ensure!(p[1] < 0.5, "eccentricity exceeds fit bound");
         let orbit = Orbit::new(p, system)?;
         let geometry: Vec<_> = samples
             .iter()
-            .map(|&(dt, _)| orbit.geometry(dt, toe, false))
+            .enumerate()
+            .map(|(index, &(dt, _))| {
+                orbit.geometry(dt, toe, false, cached.and_then(|g| g.get(index)))
+            })
             .collect();
         let values = DVector::from_iterator(
             samples.len() * 3,
@@ -389,7 +423,7 @@ pub fn fit(
     if let Some(dn) = pinned_dn {
         u[6] = dn;
     }
-    let (mut r, mut orbit, mut geometry) = residual(u)?;
+    let (mut r, mut orbit, mut geometry) = residual(from_regular(u), None)?;
     let mut score = r.norm_squared();
     let mut damping = 1e-3;
     let mut iterations = 0;
@@ -407,7 +441,9 @@ pub fn fit(
                 a[index] += h;
                 let mut b = u;
                 b[index] -= h;
-                let derivative = (residual(a)?.0 - residual(b)?.0) / (2.0 * h);
+                let derivative = (residual(from_regular(a), Some(&geometry))?.0
+                    - residual(from_regular(b), Some(&geometry))?.0)
+                    / (2.0 * h);
                 j.set_column(column, &derivative);
             }
             j
@@ -418,8 +454,9 @@ pub fn fit(
         for (i, &norm) in norms.iter().enumerate() {
             j.column_mut(i).scale_mut(1.0 / norm);
         }
-        let normal = j.transpose() * &j;
-        let gradient = j.transpose() * &r;
+        let transposed = j.transpose();
+        let normal = &transposed * &j;
+        let gradient = transposed * &r;
         let mut improvement = false;
         let before = score;
         for _ in 0..20 {
@@ -435,7 +472,18 @@ pub fn fit(
             for (i, &index) in indices.iter().enumerate() {
                 next[index] += delta[i] / norms[i];
             }
-            if let Ok((candidate, candidate_orbit, candidate_geometry)) = residual(next) {
+            let parameters = from_regular(next);
+            if parameters
+                .iter()
+                .zip(orbit.parameters)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            {
+                damping *= 10.0;
+                continue;
+            }
+            if let Ok((candidate, candidate_orbit, candidate_geometry)) =
+                residual(parameters, Some(&geometry))
+            {
                 let next_score = candidate.norm_squared();
                 if next_score < score {
                     u = next;
@@ -542,6 +590,49 @@ pub fn glonass_acceleration(p: [f64; 3], v: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cached_trigonometry_preserves_signed_zero() {
+        for previous in [0.0_f64, -0.0, PI, -PI] {
+            for angle in [0.0_f64, -0.0, PI, -PI, 0.5] {
+                let expected = angle.sin_cos();
+                let actual = sin_cos_cached(angle, Some((previous, previous.sin_cos())));
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+                assert_eq!(actual.1.to_bits(), expected.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_geometry_matches_fresh_geometry_after_parameter_changes() -> Result<()> {
+        let parameters = [
+            5282.61, 0.00035, 0.96, 1.2, -0.7, 0.4, 2.1e-9, -2.3e-9, 3e-10, 1.4e-6, -2.2e-6, 8e-8,
+            -6e-8, 210.0, -140.0,
+        ];
+        for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
+            let orbit = Orbit::new(parameters, system)?;
+            for dt in [-7200.0, 0.0, 7200.0] {
+                let cached = orbit.geometry(dt, 230_400.0, false, None);
+                for index in 0..parameters.len() {
+                    for increment in [0.0, 1e-14, -1e-7, 1e-7] {
+                        let mut next = parameters;
+                        next[index] += increment;
+                        let next = Orbit::new(next, system)?;
+                        for (time, toe, geo) in
+                            [(dt, 230_400.0, false), (dt + 150.0, 237_600.0, true)]
+                        {
+                            assert_eq!(
+                                next.geometry(time, toe, geo, Some(&cached)),
+                                next.geometry(time, toe, geo, None),
+                                "{system:?}: parameter {index}, increment {increment}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn simd_levels() -> Vec<Level> {
         let detected = Level::new();
         let mut levels = vec![Level::baseline()];
@@ -582,7 +673,7 @@ mod tests {
                 let orbit = Orbit::new(from_regular(u), system)?;
                 let geometry: Vec<_> = samples
                     .iter()
-                    .map(|&(dt, _)| orbit.geometry(dt, toe, false))
+                    .map(|&(dt, _)| orbit.geometry(dt, toe, false, None))
                     .collect();
                 let analytic = jacobian(&geometry, &orbit, u, &indices, Level::new());
                 let pinned_indices: Vec<_> = (0..15).filter(|&i| i != 6).collect();
