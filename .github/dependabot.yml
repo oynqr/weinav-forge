@@ -1,6 +1,44 @@
 version: 2
 
 updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:27"
+      timezone: Etc/UTC
+    versioning-strategy: lockfile-only
+    allow:
+      - dependency-type: all
+    cooldown:
+      default-days: 2
+    groups:
+      cargo:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:27"
+      timezone: Etc/UTC
+    groups:
+      nix:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

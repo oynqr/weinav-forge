@@ -6,11 +6,6 @@ on:
       - master
   pull_request:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      revision:
-        type: string
-        default: ""
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -36,7 +31,7 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.revision || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Record the lock file hashes
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
@@ -74,7 +69,7 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.revision || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Record the lock file hashes
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"

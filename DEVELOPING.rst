@@ -216,47 +216,47 @@ current manifest. Failed updates and reboots must keep the previous output,
 even after its timestamp expires. Cache cleanup must keep objects referenced
 by a committed source manifest or current URL metadata.
 
-Lock file updates
------------------
+Dependency updates
+------------------
 
-The ``update lock files`` workflow runs weekly. You can also start it
-manually on the default branch. Cargo uses the minimum publication age in
-``.cargo/config.toml``: two days, with the ``deny`` policy.
+Dependabot checks Cargo, Nix flake inputs and GitHub Actions each Monday at
+03:27 UTC. It makes one version update group for each ecosystem. The
+configuration is in ``.github/dependabot.yml``. Cargo version updates
+include indirect dependencies and change only ``Cargo.lock``.
+External actions must use full commit pins.
+
+Enable Dependabot alerts and security updates in the repository settings.
+Cargo security updates use the separate ``cargo-security`` group. They do
+not wait for the weekly version update schedule or the two-day cooldown.
+
+The ``merge dependency updates`` workflow runs after the build workflow.
+It checks the Dependabot author and each commit signature. It permits
+changes to ``Cargo.lock``, ``flake.lock`` and action pins only.
+Changes to other files, including ``Cargo.toml``, need manual review.
+
+For ordinary Cargo updates, the merge check reads the publication age from
+the base branch's ``.cargo/config.toml``. It checks each new package version
+against crates.io, including indirect dependencies. Keep the Cargo cooldown
+in ``.github/dependabot.yml`` equal to this age. A signed commit with the
+``cargo-security`` group is exempt from the age check. The build, test and
+lint checks still apply.
+
+The workflow advances the default branch by fast-forward only. This keeps
+the signed Dependabot commits unchanged. Both tested branches must still be
+current, and repository rules must permit the update. No pull request code
+runs in the merge workflow.
+
+This setup uses the built-in ``GITHUB_TOKEN``. No personal access token or
+extra repository secret is required. The token needs permission to update
+the default branch by fast-forward. Require the build and lint checks in
+the branch rules.
+
+If a merge fails, read the workflow log. If the base branch changed, ask
+Dependabot to rebase with ``@dependabot rebase`` on the pull request. If a
+package is too new, rerun the failed merge job after the age limit. A failed
+publication lookup leaves the pull request open.
 
 To update the lock files locally, run::
 
   nix flake update
   nix develop --no-update-lock-file -c cargo update -Z min-publish-age
-
-Automatic updates open a pull request with only the two lock files. The
-``lock-file-update`` status covers build, test and lint checks on both
-supported systems. The workflow merges the checked commit by fast-forward.
-If checks fail, either branch changes, or repository rules block the merge,
-the pull request stays open.
-
-Permit GitHub Actions to create pull requests in the repository settings.
-The ``GITHUB_TOKEN`` must also be able to update the default branch reference
-by fast-forward.
-
-Read the failed job's log before you retry an update. A new run creates a
-new update branch and pull request. Previous open pull requests stay open.
-
-GitHub Action updates
----------------------
-
-External actions use full commit pins. Dependabot checks for action updates
-each Monday at 03:27 UTC and groups them in one pull request. The schedule
-is in ``.github/dependabot.yml``. Cargo and Nix lock files use the separate
-weekly workflow above, which keeps Cargo's minimum publication age.
-
-The normal pull request checks test the new action pins. After a successful
-build, ``merge action updates`` checks that Dependabot opened the pull
-request and that only action pins changed. It permits a fast-forward only
-when the tested head and base are still current and repository rules permit
-the merge. Otherwise, the pull request stays open. The merge workflow does
-not check out or execute code from the pull request.
-
-This setup uses Dependabot and the built-in ``GITHUB_TOKEN``. No personal
-access token or extra repository secret is required. The token must have
-permission to update the default branch by fast-forward. CI rejects
-external actions that do not use full commit pins.
