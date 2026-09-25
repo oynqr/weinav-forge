@@ -11,8 +11,15 @@ use std::collections::BTreeMap;
 pub struct Sample {
     pub time: f64,
     pub position: [f64; 3],
-    pub clock: Option<f64>,
+    clock: f64,
+    has_clock: bool,
     pub predicted: bool,
+}
+
+impl Sample {
+    pub fn clock(&self) -> Option<f64> {
+        self.has_clock.then_some(self.clock)
+    }
 }
 
 #[derive(Default)]
@@ -71,11 +78,8 @@ impl Sp3 {
                 let sample = Sample {
                     time,
                     position: [values[0] * 1000.0, values[1] * 1000.0, values[2] * 1000.0],
-                    clock: if values[3].abs() >= 999_999.0 {
-                        None
-                    } else {
-                        Some(values[3] * 1e-6)
-                    },
+                    clock: values[3] * 1e-6,
+                    has_clock: values[3].abs() < 999_999.0,
                     predicted: line.as_bytes().get(79) == Some(&b'P'),
                 };
                 let samples = self.satellites.entry((system, svid)).or_default();
@@ -136,7 +140,7 @@ impl Sp3 {
                 for (axis, value) in xyz.iter_mut().enumerate() {
                     *value += weight * sample.position[axis];
                 }
-                clock += weight * sample.clock.context("missing SP3 clock")?;
+                clock += weight * sample.clock().context("missing SP3 clock")?;
             }
             Ok((xyz, clock))
         };
@@ -189,12 +193,12 @@ mod tests {
             assert_eq!(entry.time - samples[0].time, minute as f64 * 60.0);
             if minute != 4 {
                 assert_eq!(entry.position[0], (10_000.0 + minute as f64) * 1000.0);
-                assert_eq!(entry.clock, Some(1e-6));
+                assert_eq!(entry.clock(), Some(1e-6));
                 assert!(!entry.predicted);
             }
         }
         assert_eq!(samples[4].position[0], 60_000_000.0);
-        assert!(samples[4].clock.is_none());
+        assert!(samples[4].clock().is_none());
         assert!(samples[4].predicted);
         let time = samples[5].time;
         assert_eq!(sp3.window(key), Some((samples[4].time, samples[6].time)));

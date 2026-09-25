@@ -11,13 +11,64 @@ use std::{borrow::Cow, collections::BTreeMap, f64::consts::PI};
 #[path = "rinex_fields.rs"]
 mod schema;
 
+const MAX_NAVIGATION_FIELDS: usize = 31;
+
 #[derive(Clone, Debug)]
 pub struct Navigation {
     pub system: System,
     pub svid: u8,
     pub epoch: f64,
     pub system_epoch: f64,
-    pub values: BTreeMap<&'static str, f64>,
+    pub values: Values,
+}
+
+#[derive(Clone, Debug)]
+pub struct Values {
+    names: &'static [&'static str],
+    data: Box<[f64]>,
+    present: u32,
+}
+
+impl Values {
+    fn new(names: &'static [&'static str], fields: &[Option<f64>; MAX_NAVIGATION_FIELDS]) -> Self {
+        let mut present = 0;
+        let data = names
+            .iter()
+            .zip(fields)
+            .enumerate()
+            .map(|(index, (_, value))| {
+                if let Some(value) = value {
+                    present |= 1 << index;
+                    *value
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        Self {
+            names,
+            data,
+            present,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&f64> {
+        let index = self.names.iter().position(|&name| name == key)?;
+        if self.present & (1 << index) == 0 {
+            None
+        } else {
+            self.data.get(index)
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&'static str, f64)> + '_ {
+        self.names
+            .iter()
+            .zip(&self.data)
+            .enumerate()
+            .filter(|(index, _)| self.present & (1 << index) != 0)
+            .map(|(_, (&name, &value))| (name, value))
+    }
 }
 
 #[derive(Default)]
@@ -130,12 +181,12 @@ impl Broadcast {
                 System::Bds => system_epoch + 14.0,
                 _ => system_epoch,
             };
-            let mut values = Vec::new();
-            for i in 0..3 {
-                values.push(Some(number(
+            let mut values = [None; MAX_NAVIGATION_FIELDS];
+            for (i, value) in values.iter_mut().take(3).enumerate() {
+                *value = Some(number(
                     line.get(23 + i * 19..42 + i * 19)
                         .context("short RINEX clock")?,
-                )?));
+                )?);
             }
             index += 1;
             let max_lines = if system == System::Glonass { 4 } else { 7 };
@@ -146,11 +197,11 @@ impl Broadcast {
                         .get(4 + i * 19..(23 + i * 19).min(lines[index].len()))
                         .unwrap_or("")
                         .trim();
-                    values.push(if field.is_empty() {
+                    values[3 + body * 4 + i] = if field.is_empty() {
                         None
                     } else {
                         Some(number(field)?)
-                    });
+                    };
                 }
                 body += 1;
                 index += 1;
@@ -160,11 +211,7 @@ impl Broadcast {
                 "truncated RINEX orbit"
             );
             let names = schema::names(code).context("unsupported RINEX system")?;
-            let values: BTreeMap<_, _> = names
-                .iter()
-                .zip(values)
-                .filter_map(|(name, value)| value.map(|v| (*name, v)))
-                .collect();
+            let values = Values::new(names, &values);
             let nav = Navigation {
                 system,
                 svid,
@@ -327,7 +374,7 @@ impl Navigation {
         let mut values: BTreeMap<String, f64> = self
             .values
             .iter()
-            .map(|(&key, &value)| (key.to_owned(), value))
+            .map(|(key, value)| (key.to_owned(), value))
             .collect();
         for key in ["idot", "delta_n", "m0", "omega0", "i0", "omega", "omegadot"] {
             if let Some(value) = values.get_mut(key) {
@@ -341,6 +388,38 @@ impl Navigation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_fields_preserve_missing_values_and_float_bits() {
+        for system in ['G', 'J', 'E', 'C', 'R'] {
+            let names = schema::names(system).unwrap();
+            let fields = std::array::from_fn(|index| match index % 4 {
+                0 => None,
+                1 => Some(0.0),
+                2 => Some(-0.0),
+                _ => Some(index as f64),
+            });
+            let values = Values::new(names, &fields);
+            for (&name, expected) in names.iter().zip(fields) {
+                assert_eq!(
+                    values.get(name).copied().map(f64::to_bits),
+                    expected.map(f64::to_bits)
+                );
+            }
+            assert!(values.get("unknown").is_none());
+            let expected: BTreeMap<_, _> = names
+                .iter()
+                .zip(fields)
+                .filter_map(|(&name, value)| value.map(|value| (name, value.to_bits())))
+                .collect();
+            let actual: BTreeMap<_, _> = values
+                .clone()
+                .iter()
+                .map(|(name, value)| (name, value.to_bits()))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn numeric_fields_accept_fortran_exponents_and_reject_nonfinite_values() -> Result<()> {
