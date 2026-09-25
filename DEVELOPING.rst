@@ -36,6 +36,112 @@ These tests check seed and EXTRA data against captured bytes. They also
 check RTCM field encoding and decoding, and rejection of invalid QZSS data.
 Normal test runs skip these tests. Use the command above to run them.
 
+Processing performance
+----------------------
+
+Use one fixed source cache and one fixed ``--at`` value for a comparison.
+Do not fetch data between runs. Select a time covered by the cached sources.
+Check the report status and satellite counts before you measure a build.
+A quick refusal does not measure a complete build. Keep each executable and
+its output in a separate path. Stop other builds before you measure time.
+
+Before a change, copy the release executable::
+
+  mkdir -p target/performance
+  nix develop -c cargo build --release
+  cp target/release/weinav-forge target/performance/before
+
+After the change, build again and copy it to ``target/performance/after``.
+Set ``BENCH_CACHE`` to the source cache path. Set ``BENCH_AT`` to the fixed
+RFC 3339 time. Export both variables, then run::
+
+  nix shell --inputs-from . nixpkgs#hyperfine nixpkgs#util-linux -c \
+    hyperfine --warmup 1 --runs 5 \
+    --export-json target/performance/timings.json \
+    --parameter-list binary before,after \
+    'taskset -c 0 target/performance/{binary} process \
+    --flavor huawei-plus --systems gps,galileo,qzs --no-agnss \
+    --cache "$BENCH_CACHE" --at "$BENCH_AT" \
+    --output target/performance/{binary}-output'
+
+Select an available CPU instead of CPU 0 if necessary. For a service build,
+save the executable from ``nix build`` and repeat the same comparison.
+This checks the static executable with its own math library.
+
+Use the profiling build to keep symbols for samply::
+
+  nix develop -c cargo build --profile profiling
+  nix shell --inputs-from . nixpkgs#samply nixpkgs#util-linux -c \
+    taskset -c 0 samply record --save-only --unstable-presymbolicate \
+    --output target/performance/profile.json.gz \
+    target/profiling/weinav-forge process \
+    --flavor huawei-plus --systems gps,galileo,qzs --no-agnss \
+    --cache "$BENCH_CACHE" --at "$BENCH_AT" \
+    --output target/performance/profile-output
+
+The host must permit access to Linux performance events. A single CPU also
+limits the memory needed for the recording. Keep the profile and its symbol
+file together. Time the release executable without the profiler attached.
+
+The first profile on 2026-09-25 used all five constellations. About 87 percent
+of CPU samples were in trigonometry, orbit position and fit residuals.
+The work was ranked in this order:
+
+1. Replace numerical fit derivatives with analytic derivatives. Numerical
+   derivatives needed two orbit evaluations per free parameter and sample.
+2. Measure release optimization level 3 against level ``z``.
+3. Reduce matrix allocation and source parsing. These costs were much smaller
+   in the first profile, so these changes were deferred.
+
+The fitter now evaluates an analytic Jacobian once per sample. It converts
+the derivatives to the same regular eccentricity coordinates as the fit.
+Below an eccentricity of ``1e-6``, it keeps central differences to avoid
+division by a small eccentricity. Tests compare each analytic column with
+central differences for all four Kepler constellations. Other tests cover
+circular orbits and the fixed QZSS mean-motion parameter.
+
+The orbit model, iteration limits, fit limits and output checks did not
+change. Different derivatives can change fitted parameters and encoded
+bytes. Compare decoded results and gate reports, not only ZIP checksums.
+Archive UUIDs also change between runs. Use the report's payload checksums
+to compare file bytes without those UUIDs.
+
+The comparison used commit ``a1f2651`` as the baseline, hyperfine 1.20.0,
+samply 0.13.1 and Rust 1.100.0-nightly (2026-08-21). A KVM guest on an AMD
+Ryzen 9 7950X3D used CPU 0. Each timing had one warm-up and five measured
+runs. The fixed time was ``2026-09-25T11:40:00Z``. The cache manifest had this
+SHA-256 checksum::
+
+  6b41436dfb850190f40baa1845d32050b6402f45d625a2e5a7a76bc82d4e19b4
+
+For ``huawei-plus`` with GPS, Galileo and QZSS, without AGNSS, native release
+times were as follows. Each value is the mean and standard deviation.
+
+============================ ==================
+Build                        Time in seconds
+============================ ==================
+Baseline                     10.045 +/- 0.035
+Analytic Jacobian, level z    2.239 +/- 0.007
+Analytic Jacobian, level 3    1.683 +/- 0.011
+============================ ==================
+
+All three builds passed the output checks and kept the same 2,141 records.
+The two analytic builds had identical payload checksums. Optimization level
+3 increased the native executable from 3,778,760 to 4,919,608 bytes.
+
+For the same passing workload, the static Nix executable changed from
+10.612 +/- 0.013 seconds to 2.303 +/- 0.015 seconds, or 4.61 times faster.
+Its size changed from 3,431,384 to 4,647,896 bytes. Both versions kept the
+same 2,141 records. The largest RMS error after encoding changed from
+0.095 metre to 0.084 metre, below the unchanged 1.5 metre limit.
+
+The full five-constellation workload kept the same 6,936 records, excluded
+satellites and gate results. Both versions refused that source snapshot
+because GLONASS and BDS had too few satellites. This refusal workload was
+kept separate from the passing ZIP build. Its static build time changed
+from 15.993 +/- 0.107 seconds to 3.321 +/- 0.005 seconds, or 4.82 times
+faster. The timing command required exit code 4 on each run.
+
 NixOS tests
 -----------
 

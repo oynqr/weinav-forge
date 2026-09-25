@@ -161,6 +161,133 @@ fn from_regular(u: Parameters) -> Parameters {
     p
 }
 
+fn jacobian(
+    samples: &[(f64, [f64; 3])],
+    toe: f64,
+    system: System,
+    u: Parameters,
+    indices: &[usize],
+) -> DMatrix<f64> {
+    let [
+        sqa,
+        ecc,
+        i0,
+        omega0,
+        omega,
+        m0,
+        dn,
+        omd,
+        idot,
+        cuc,
+        cus,
+        cic,
+        cis,
+        crc,
+        crs,
+    ] = from_regular(u);
+    let a = sqa * sqa;
+    let unperturbed_motion = gravity(system).sqrt() / sqa.powi(3);
+    let n = unperturbed_motion + dn;
+    let eccentricity_scale = (1.0 - ecc * ecc).sqrt();
+    let rate = earth_rate(system);
+    let mut j = DMatrix::zeros(samples.len() * 3, indices.len());
+    for (sample_index, &(dt, _)) in samples.iter().enumerate() {
+        let mean = angle(m0 + n * dt);
+        let mut eccentric = mean;
+        for _ in 0..20 {
+            let (sin_e, cos_e) = eccentric.sin_cos();
+            let delta = (eccentric - ecc * sin_e - mean) / (1.0 - ecc * cos_e);
+            eccentric -= delta;
+            if delta.abs() < 1e-14 {
+                break;
+            }
+        }
+        let (sin_e, cos_e) = eccentric.sin_cos();
+        let denominator = 1.0 - ecc * cos_e;
+        let anomaly = (eccentricity_scale * sin_e).atan2(cos_e - ecc);
+        let phi = anomaly + omega;
+        let (s2, c2) = (2.0 * phi).sin_cos();
+        let argument = phi + cuc * c2 + cus * s2;
+        let radius = a * denominator + crc * c2 + crs * s2;
+        let inclination = i0 + idot * dt + cic * c2 + cis * s2;
+        let node = omega0 + (omd - rate) * dt - rate * toe;
+        let (sin_u, cos_u) = argument.sin_cos();
+        let (sin_i, cos_i) = inclination.sin_cos();
+        let (sin_node, cos_node) = node.sin_cos();
+        let xp = radius * cos_u;
+        let yp = radius * sin_u;
+        let x = xp * cos_node - yp * cos_i * sin_node;
+        let y = xp * sin_node + yp * cos_i * cos_node;
+        let mut derivatives = [[0.0; 3]; 15];
+        for (index, derivative) in derivatives.iter_mut().enumerate() {
+            let d_mean = match index {
+                0 => -3.0 * unperturbed_motion * dt / sqa,
+                5 => 1.0,
+                6 => dt,
+                _ => 0.0,
+            };
+            let d_ecc = if index == 1 { 1.0 } else { 0.0 };
+            let d_e = (d_mean + sin_e * d_ecc) / denominator;
+            let d_phi = eccentricity_scale / denominator * d_e
+                + sin_e / (eccentricity_scale * denominator) * d_ecc
+                + if index == 4 { 1.0 } else { 0.0 };
+            let d_argument = (1.0 - 2.0 * cuc * s2 + 2.0 * cus * c2) * d_phi
+                + match index {
+                    9 => c2,
+                    10 => s2,
+                    _ => 0.0,
+                };
+            let d_radius = a * (ecc * sin_e * d_e - cos_e * d_ecc)
+                + 2.0 * (-crc * s2 + crs * c2) * d_phi
+                + match index {
+                    0 => 2.0 * sqa * denominator,
+                    13 => c2,
+                    14 => s2,
+                    _ => 0.0,
+                };
+            let d_inclination = 2.0 * (-cic * s2 + cis * c2) * d_phi
+                + match index {
+                    2 => 1.0,
+                    8 => dt,
+                    11 => c2,
+                    12 => s2,
+                    _ => 0.0,
+                };
+            let d_node = match index {
+                3 => 1.0,
+                7 => dt,
+                _ => 0.0,
+            };
+            let d_xp = d_radius * cos_u - yp * d_argument;
+            let d_yp = d_radius * sin_u + xp * d_argument;
+            *derivative = [
+                d_xp * cos_node - d_yp * cos_i * sin_node + yp * sin_i * sin_node * d_inclination
+                    - y * d_node,
+                d_xp * sin_node + d_yp * cos_i * cos_node - yp * sin_i * cos_node * d_inclination
+                    + x * d_node,
+                d_yp * sin_i + yp * cos_i * d_inclination,
+            ];
+        }
+        for (column, &index) in indices.iter().enumerate() {
+            for axis in 0..3 {
+                let derivative = match index {
+                    1 => {
+                        derivatives[1][axis] * u[1] / ecc
+                            - (derivatives[4][axis] - derivatives[5][axis]) * u[4] / (ecc * ecc)
+                    }
+                    4 => {
+                        derivatives[1][axis] * u[4] / ecc
+                            + (derivatives[4][axis] - derivatives[5][axis]) * u[1] / (ecc * ecc)
+                    }
+                    _ => derivatives[index][axis],
+                };
+                j[(sample_index * 3 + axis, column)] = -derivative;
+            }
+        }
+    }
+    j
+}
+
 pub struct Fit {
     pub parameters: Parameters,
     pub rms: f64,
@@ -199,16 +326,22 @@ pub fn fit(
     let mut iterations = 0;
     for iteration in 0..80 {
         iterations = iteration + 1;
-        let mut j = DMatrix::zeros(r.len(), indices.len());
-        for (column, &index) in indices.iter().enumerate() {
-            let h = steps[index].max(u[index].abs() * 1e-7);
-            let mut a = u;
-            a[index] += h;
-            let mut b = u;
-            b[index] -= h;
-            let derivative = (residual(a)? - residual(b)?) / (2.0 * h);
-            j.set_column(column, &derivative);
-        }
+        let minimum_analytic_eccentricity = 1e-6;
+        let mut j = if u[1].hypot(u[4]) >= minimum_analytic_eccentricity {
+            jacobian(samples, toe, system, u, &indices)
+        } else {
+            let mut j = DMatrix::zeros(r.len(), indices.len());
+            for (column, &index) in indices.iter().enumerate() {
+                let h = steps[index].max(u[index].abs() * 1e-7);
+                let mut a = u;
+                a[index] += h;
+                let mut b = u;
+                b[index] -= h;
+                let derivative = (residual(a)? - residual(b)?) / (2.0 * h);
+                j.set_column(column, &derivative);
+            }
+            j
+        };
         let norms: Vec<f64> = (0..j.ncols())
             .map(|i| j.column(i).norm().max(1e-30))
             .collect();
@@ -338,6 +471,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn analytic_jacobian_matches_central_differences() -> Result<()> {
+        let indices: Vec<_> = (0..15).collect();
+        let samples: Vec<_> = [-7200.0, -3600.0, 0.0, 3600.0, 7200.0]
+            .into_iter()
+            .map(|dt| (dt, [0.0; 3]))
+            .collect();
+        let steps: Parameters = [
+            1e-3, 1e-8, 1e-7, 1e-7, 1e-8, 1e-7, 1e-11, 1e-11, 1e-11, 1e-7, 1e-7, 1e-7, 1e-7, 1e-2,
+            1e-2,
+        ];
+        let toe = 597_600.0;
+        for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
+            for ecc in [1e-6, 0.00035, 0.1, 0.49] {
+                let p = [
+                    5282.61, ecc, 0.96, 1.2, -0.7, 0.4, 2.1e-9, -2.3e-9, 3e-10, 1.4e-6, -2.2e-6,
+                    8e-8, -6e-8, 210.0, -140.0,
+                ];
+                let u = to_regular(p);
+                let analytic = jacobian(&samples, toe, system, u, &indices);
+                for (column, &h) in steps.iter().enumerate() {
+                    let mut above = u;
+                    let mut below = u;
+                    above[column] += h;
+                    below[column] -= h;
+                    let mut numeric = Vec::new();
+                    for &(dt, _) in &samples {
+                        let a = position(&from_regular(above), dt, toe, system, false)?;
+                        let b = position(&from_regular(below), dt, toe, system, false)?;
+                        numeric.extend((0..3).map(|axis| (b[axis] - a[axis]) / (2.0 * h)));
+                    }
+                    let numeric = DVector::from_vec(numeric);
+                    let error = (analytic.column(column) - &numeric).norm() / numeric.norm();
+                    assert!(
+                        error < 1e-5,
+                        "{system:?}, eccentricity {ecc}, {}: relative error {error}",
+                        PARAMETER_NAMES[column]
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fits_circular_orbits_and_preserves_pinned_mean_motion() -> Result<()> {
+        for ecc in [0.0, 1e-8, 1e-6, 0.1] {
+            for pinned in [None, Some(2.1e-9)] {
+                let p = [
+                    6493.0, ecc, 0.7, 1.2, -0.7, 0.4, 2.1e-9, -2.3e-9, 3e-10, 1.4e-6, -2.2e-6,
+                    8e-8, -6e-8, 210.0, -140.0,
+                ];
+                let toe = 230_400.0;
+                let samples = (-24..=24)
+                    .map(|i| {
+                        let dt = f64::from(i) * 300.0;
+                        Ok((dt, position(&p, dt, toe, System::Qzs, false)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut start = p;
+                start[0] += 0.01;
+                start[5] += 1e-5;
+                let fitted = fit(&samples, toe, System::Qzs, start, pinned)?;
+                assert!(fitted.rms < 0.01, "eccentricity {ecc}: {}", fitted.rms);
+                if let Some(dn) = pinned {
+                    assert_eq!(fitted.parameters[6], dn);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn recovers_a_known_orbit_including_near_circular_eccentricity() -> Result<()> {
         for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
             let p = [
@@ -363,6 +568,11 @@ mod tests {
             let fit = fit(&samples, toe, system, initial(&state, toe, system)?, None)?;
             assert!(fit.rms < 0.01, "{system:?}: RMS {}", fit.rms);
             assert!(fit.parameters[1] >= 0.0 && fit.parameters[1] < 1.0);
+            for dt in [-3525.0, -1725.0, 75.0, 1875.0, 3525.0] {
+                let expected = Vector3::from(position(&p, dt, toe, system, false)?);
+                let actual = Vector3::from(position(&fit.parameters, dt, toe, system, false)?);
+                assert!((actual - expected).norm() < 0.01);
+            }
         }
         Ok(())
     }
