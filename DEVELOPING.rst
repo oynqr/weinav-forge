@@ -4,7 +4,9 @@ Development
 Build and check
 ---------------
 
-Use the Nix development shell for the pinned Rust toolchain::
+Use the Nix development shell for the pinned Rust toolchain:
+
+.. code-block:: bash
 
   nix develop -c cargo build --release
   nix develop -c cargo test
@@ -31,7 +33,9 @@ Captured data tests
 -------------------
 
 Some tests need the captured files from the supplied specification archive.
-Extract its ``fixtures`` directory and run::
+Extract its ``fixtures`` directory and run:
+
+.. code-block:: bash
 
   WEINAV_FIXTURES=/path/to/fixtures nix develop -c \
     cargo test --test fixtures -- --ignored
@@ -49,7 +53,9 @@ Check the report status and satellite counts before you measure a build.
 A quick refusal does not measure a complete build. Keep each executable and
 its output in a separate path. Stop other builds before you measure time.
 
-Before a change, copy the release executable::
+Before a change, copy the release executable:
+
+.. code-block:: bash
 
   mkdir -p target/performance
   nix develop -c cargo build --release
@@ -57,7 +63,9 @@ Before a change, copy the release executable::
 
 After the change, build again and copy it to ``target/performance/after``.
 Set ``BENCH_CACHE`` to the source cache path. Set ``BENCH_AT`` to the fixed
-RFC 3339 time. Export both variables, then run::
+RFC 3339 time. Export both variables, then run:
+
+.. code-block:: bash
 
   nix shell --inputs-from . nixpkgs#hyperfine nixpkgs#util-linux -c \
     hyperfine --warmup 1 --runs 5 \
@@ -80,13 +88,17 @@ memory use. Orbit calculations and variants share one worker pool.
 
 The batch comparison test needs a cache with Huawei and Huawei-plus sources.
 The three-system Huawei-plus build must pass its checks at the selected
-time. Run it with::
+time. Run it with:
+
+.. code-block:: bash
 
   WEINAV_PROCESS_CACHE="$BENCH_CACHE" WEINAV_PROCESS_AT="$BENCH_AT" \
     nix develop -c cargo test --release --test cli \
     parallel_batches_preserve_payloads_reports_and_partial_success -- --ignored
 
-Use the profiling build to keep symbols for samply::
+Use the profiling build to keep symbols for samply:
+
+.. code-block:: bash
 
   nix develop -c cargo build --profile profiling
   nix shell --inputs-from . nixpkgs#samply nixpkgs#util-linux -c \
@@ -112,7 +124,9 @@ NixOS tests
 
 The NixOS checks evaluate module options and run a VM with controlled source
 responses. The VM test checks service permissions, offline builds,
-compression, HTTP responses, failed updates, expiry and reboot recovery::
+compression, HTTP responses, failed updates, expiry and reboot recovery:
+
+.. code-block:: bash
 
   nix build .#checks.x86_64-linux.module-evaluation
   nix build .#checks.x86_64-linux.module-vm
@@ -124,7 +138,9 @@ Format and lint
 ---------------
 
 Get the other check tools from nixpkgs. Use the flake inputs to select the
-same tool versions as CI::
+same tool versions as CI:
+
+.. code-block:: bash
 
   nix shell --inputs-from . nixpkgs#nixfmt-rfc-style -c \
     nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
@@ -138,9 +154,9 @@ same tool versions as CI::
   nix shell --inputs-from . nixpkgs#actionlint -c \
     actionlint .github/workflows/*.yml
   nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
-    rst2pseudoxml --exit-status=1 README.rst
+    rst2pseudoxml --syntax-highlight=none --exit-status=1 README.rst
   nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
-    rst2pseudoxml --exit-status=1 DEVELOPING.rst
+    rst2pseudoxml --syntax-highlight=none --exit-status=1 DEVELOPING.rst
 
 Both RST files use ASD-STE100 Simplified Technical English and ASCII
 characters. Keep text lines at 79 characters or less. A table line can be
@@ -150,7 +166,9 @@ and repository maintenance in this file.
 
 Mark each Nix example in an RST file with ``.. code-block:: nix``.
 The ``documentation`` flake check checks RST syntax and runs nixfmt and
-statix on these examples. Run it with::
+statix on these examples. Run it with:
+
+.. code-block:: bash
 
   nix build .#checks.x86_64-linux.documentation
 
@@ -276,7 +294,9 @@ If a merge fails for another reason, read the workflow log. If a package is
 too new, rerun the failed merge job after the age limit. A failed
 publication lookup leaves the pull request open.
 
-To update the lock files locally, run::
+To update the lock files locally, run:
+
+.. code-block:: bash
 
   nix flake update
   nix develop --no-update-lock-file -c cargo update -Z min-publish-age

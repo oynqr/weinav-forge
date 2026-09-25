@@ -11,7 +11,9 @@ One Rust executable has two commands:
 Build
 -----
 
-Use Nix to build the Linux executable::
+Use Nix to build the Linux executable:
+
+.. code-block:: bash
 
   nix build
   ./result/bin/weinav-forge --help
@@ -22,7 +24,9 @@ Source policy
 -------------
 
 Select a flavor for each build. Use ``--plan`` to see its source policy
-without reading or downloading source files::
+without reading or downloading source files:
+
+.. code-block:: bash
 
   weinav-forge fetch --flavor huawei-plus --plan
 
@@ -51,7 +55,9 @@ fail its checks when current sources have too few usable satellites.
 Fetch and process
 -----------------
 
-For example::
+For example:
+
+.. code-block:: bash
 
   weinav-forge fetch --flavor huawei-plus --cache ./cache
   weinav-forge process --flavor huawei-plus --cache ./cache --output ./staging
@@ -72,7 +78,9 @@ The local files replace cached files for that role. Roles are:
 * ``broadcast``, ``antex``
 * ``gps-almanac``, ``galileo-almanac``
 
-For example::
+For example:
+
+.. code-block:: bash
 
   weinav-forge process --flavor huawei --systems gps --no-agnss \
     --source seed=HiEE_V2.dat \
@@ -100,7 +108,9 @@ Build multiple variants
 -----------------------
 
 Use ``process --variants PATH`` to build a list of variants in one command.
-For example, save this JSON list as ``variants.json``::
+For example, save this JSON list as ``variants.json``:
+
+.. code-block:: json
 
   [
     {"name": "watch", "flavor": "huawei-plus"},
@@ -112,7 +122,9 @@ For example, save this JSON list as ``variants.json``::
     }
   ]
 
-Fetch the sources for each flavor, then run::
+Fetch the sources for each flavor, then run:
+
+.. code-block:: bash
 
   weinav-forge process --variants variants.json --cache ./cache \
     --output ./staging --threads 2
@@ -246,11 +258,15 @@ directories. The module manages these directories and their cleanup.
 Increase the timer interval or service limits for many instances or a slower
 machine.
 
-Start a build from the cached source files with::
+Start a build from the cached source files with:
+
+.. code-block:: bash
 
   systemctl start weinav-forge-build.service
 
-Read service results and reports with::
+Read service results and reports with:
+
+.. code-block:: bash
 
   journalctl -u weinav-forge-fetch -u weinav-forge-build
   cat /var/lib/weinav-forge/reports/watch.json
