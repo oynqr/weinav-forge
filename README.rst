@@ -4,36 +4,19 @@ weinav-forge
 Build GNSS assistance data for Huawei watches and Gadgetbridge.
 One Rust executable has two commands:
 
-* ``fetch`` gets source files and saves a cache manifest.
+* ``fetch`` gets source files and saves them in a cache.
 * ``process`` reads local files, builds the products, checks the results, and
   writes ``ephemeris.zip`` and ``report.json``. It does not use the network.
 
 Build
 -----
 
-Use Nix to build a static Linux executable::
+Use Nix to build the Linux executable::
 
   nix build
   ./result/bin/weinav-forge --help
 
 The flake supports ``x86_64-linux`` and ``aarch64-linux``.
-
-HTTP requests
--------------
-
-The HTTP client is wreq. On the Huawei configuration, download and AGNSS
-hosts, it uses a profile based on the patched OkHttp 3.14.9 client in Huawei
-Health 16.1.6.320. It sends the application headers and a new random request
-ID for each request. It preserves HTTP/1 header case and order.
-
-The profile uses TLS 1.2 and 1.3. It offers HTTP/2 before HTTP/1.1 and supports
-gzip responses. It approximates the Huawei client; the Android version and
-installed HMS Core version can change that client's behavior. Certificate
-checks use WebPKI roots.
-
-Other hosts use the weinav-forge User-Agent. Each redirect selects the profile
-for its destination. Request time limits remain 8 seconds for a connection
-and 30 seconds for a complete download, including redirects.
 
 Source policy
 -------------
@@ -62,10 +45,8 @@ policy without reading or downloading source files::
   and GLONASS frequency data. Other EXTRA regions are absent. This flavor
   requires ``process --allow-degraded``.
 
-The report lists source hashes, provider choices, empty epochs, satellite
-removals, fit residuals, and each check result. All flavors use fresh broadcast
-health and position checks. A flavor can fail its checks when current sources
-have too few usable satellites. A source substitution does not disable checks.
+The report lists source files, data coverage and check results. A flavor can
+fail its checks when current sources have too few usable satellites.
 
 Fetch and process
 -----------------
@@ -75,10 +56,8 @@ For example::
   weinav-forge fetch --flavor huawei-plus --cache ./cache
   weinav-forge process --flavor huawei-plus --cache ./cache --output ./staging
 
-The cache contains immutable source objects, URL metadata, and one JSON
-manifest per flavor. A complete fetch replaces the manifest atomically.
-Processing checks the content hash of each cached object. The report and ZIP
-are each written through a temporary file.
+Use the same cache directory for both commands. Run ``fetch`` again to get
+new source data before the next build.
 
 Select constellations with ``--systems gps,galileo``. GPS is required.
 Use ``--no-agnss`` to omit AGNSS. Use the same selection for fetching and
@@ -103,16 +82,11 @@ For example::
 ``fetch --url ROLE=URL`` sets a source URL fallback chain. Repeat the option
 for each fallback URL. ``process --manifest PATH`` selects a manifest.
 ``--report PATH`` selects a separate report path. ``--fit-rms METRES`` sets
-the orbit fit limit; the default is 1 metre. The quantised orbit check permits
-an additional 0.5 metre.
+the orbit fit limit; the default is 1 metre.
 
 Use ``--at 2026-09-23T12:00:00Z`` for a reproducible build time. The source
-data must cover that time and the requested sample windows. This option also
+data must cover that time and the requested time range. This option also
 sets the ZIP timestamp; it does not make old data current.
-
-The processor checks the data format, satellite counts, time coverage and
-source policy before packing. ANTEX corrections use the satellite's radial
-phase-centre offset; transverse antenna offsets are not modelled.
 
 If processing refuses output, it saves the report and removes
 ``ephemeris.zip`` in the selected staging directory. Read entries with
@@ -153,24 +127,16 @@ flake available as the ``weinav-forge`` input::
     networking.firewall.allowedTCPPorts = [ 80 443 ];
   }
 
-This instance serves ``/agnss/watch/ephemeris.zip``. Nginx selects the
-identity, gzip or Brotli file from the same immutable generation. Each
-response has a no-store cache policy. Source files, reports, and generation
-directories have no public URL.
+This instance serves ``/agnss/watch/ephemeris.zip``. Add an instance for each
+required flavor or constellation selection. Each instance has its own URL:
+``/agnss/NAME/ephemeris.zip``, where ``NAME`` is the instance name. By default,
+each instance includes all five constellations and AGNSS.
 
-The fetch timer runs every ten minutes, with up to 30 seconds of jitter.
-The fetch service obtains the union of source roles required by the enabled
-instances. After a successful fetch, systemd starts the build service.
-The build service has no network access and reads the cache through a
-read-only mount. Both services run as separate unprivileged users with
-restricted system calls and write access.
-
-Each build first writes private staging files. It then makes gzip and Brotli
-sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
-The completed set moves to a generation directory on the output filesystem.
-A single atomic link replacement publishes the set. The ZIP keeps its
-original timestamp. Failed updates and reboots keep the previous published
-generation, including output whose timestamp has expired.
+The service fetches data every ten minutes, with a random delay of up to
+30 seconds. After a successful fetch, it builds the configured instances.
+Each instance publishes a new ZIP only when its checks pass. Failed updates
+and reboots keep its previous ZIP available, even after expiry. The ZIP keeps
+its original timestamp.
 
 Common options under ``services.weinav-forge`` are:
 
@@ -183,27 +149,22 @@ Common options under ``services.weinav-forge`` are:
 * ``fetch.timerConfig``: systemd timer settings. Set ``OnCalendar`` to change
   the schedule. ``fetch.sourceUrls`` sets URL fallback chains by source role.
 * ``fetch.timeout`` and ``build.timeout``: default 15 minutes each.
-* ``compression.threads``: pigz thread count, default 1. Brotli uses one
-  thread. ``compression.gzip.level`` and ``compression.brotli.quality``
-  both default to 6. Each format has an ``enable`` and a ``package`` option.
 * ``limits.memoryMax``, ``limits.cpuQuota`` and ``limits.tasksMax``: default
   ``1G``, ``100%`` and 64 for each service.
-* ``retention.generations``: keep at least 3 recent generations per instance.
-  ``retention.minimumGenerationAgeHours`` defaults to 24. Cleanup always
-  keeps the current generation, regardless of its age.
-* ``retention.cacheMaxAgeHours``: default 168. Cleanup removes old URL
-  metadata and old objects that no committed manifest or current URL
-  metadata references.
+* ``retention.generations``: keep at least 3 recent output versions per
+  instance. ``retention.minimumGenerationAgeHours`` defaults to 24. Cleanup
+  always keeps the published version, regardless of its age.
+* ``retention.cacheMaxAgeHours``: age limit for unused cached files, default
+  168 hours.
 * ``nginx.enable``, ``nginx.virtualHost`` and ``nginx.location``: configure
   the archive locations. Configure TLS, listeners and the firewall through
   the standard NixOS options.
 
 The three data directories must be separate. Do not use one as a parent of
-another. The module owns these directories and their cleanup. A shared lock
-prevents fetching, building and cleanup at the same time. Increase the timer
-interval or service limits for many instances or a slower machine.
+another. The module manages these directories and their cleanup. Increase
+the timer interval or service limits for many instances or a slower machine.
 
-Start a build from the committed cache with::
+Start a build from the cached source files with::
 
   systemctl start weinav-forge-build.service
 

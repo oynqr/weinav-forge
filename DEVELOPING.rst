@@ -77,10 +77,17 @@ and repository maintenance in this file.
 Huawei HTTP profile
 -------------------
 
-The Huawei profile starts from the wreq-util OkHttp 3.14 profile. It uses
-the patched NetworkKit client described in the supplied ``CLIENT.md`` as
-its reference. Some header bindings are inferred. Android TLS details and
-the active HMS Core version are unknown, so the profile is an approximation.
+The HTTP client is wreq. The Huawei profile starts from the wreq-util
+OkHttp 3.14 profile. Its reference is the patched NetworkKit OkHttp 3.14.9
+client in Huawei Health 16.1.6.320, described in the supplied ``CLIENT.md``.
+Some header bindings are inferred. Android TLS details and the active
+HMS Core version are unknown, so the profile is an approximation.
+
+Huawei configuration, download and AGNSS hosts receive the application
+headers and a fresh random request ID. Other hosts receive the weinav-forge
+User-Agent. Each redirect selects the profile for its destination. Time
+limits are 8 seconds for a connection and 30 seconds for a complete download,
+including redirects.
 
 TLS offers the five permitted TLS 1.2 cipher suites and the three selected
 TLS 1.3 cipher suites. ALPN offers HTTP/2 before HTTP/1.1. Session tickets
@@ -92,6 +99,46 @@ Local server tests check the actual TLS ClientHello, HTTP/2 frames, and
 HTTP/1 header case and order. Other tests check fresh request IDs, header
 selection after redirects, and separate HTTP and AGNSS gzip layers.
 Keep certificate checks enabled. The client uses WebPKI roots.
+
+Source cache and processing
+---------------------------
+
+The cache contains immutable source objects, URL metadata, and one JSON
+manifest per flavor. A complete fetch replaces the manifest atomically.
+Processing checks the content hash of each cached object. The report and ZIP
+are each written through a temporary file.
+
+The processor checks the data format, satellite counts, time coverage and
+source policy before packing. ANTEX corrections use the satellite's radial
+phase-centre offset; transverse antenna offsets are not modelled. The
+quantised orbit check permits 0.5 metre beyond the configured fit limit.
+
+Service publication
+-------------------
+
+The fetch service gets the combined source data needed by enabled instances.
+The build service has no network access and reads the cache through a
+read-only mount. The services use separate unprivileged users. A shared lock
+prevents fetching, building and cleanup from running at the same time.
+
+Each build first writes private staging files. It then makes gzip and Brotli
+sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
+The completed set moves to a generation directory on the output filesystem.
+A single atomic link replacement publishes the set.
+
+Nginx selects the identity, gzip or Brotli file from one immutable generation
+for each request. Each response has a no-store cache policy. Source files,
+reports, and generation directories have no public URL.
+
+The module's ``compression.threads`` option sets the pigz thread count; the
+default is 1. Brotli uses one thread. ``compression.gzip.level`` and
+``compression.brotli.quality`` both default to 6. Each format also has an
+``enable`` and a ``package`` option.
+
+Failed updates and reboots keep the previous published generation,
+including output whose timestamp has expired. Cleanup always keeps the
+current generation. Cache cleanup removes old URL metadata and old objects
+that no committed manifest or current URL metadata references.
 
 Lock file updates
 -----------------
