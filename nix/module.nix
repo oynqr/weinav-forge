@@ -111,30 +111,35 @@ let
       fi
     ''}
   '';
+  variantsFile = pkgs.writeText "weinav-forge-variants.json" (
+    builtins.toJSON (
+      lib.mapAttrsToList (name: instance: {
+        inherit name;
+        inherit (instance) flavor systems agnss;
+        fit_rms = instance.fitRms;
+        allow_degraded = instance.allowDegraded;
+      }) instances
+    )
+  );
   buildOne =
     name: instance:
     let
       destination = "${cfg.outputDirectory}/${name}";
-      args =
-        commonArgs instance
-        ++ [
-          "--fit-rms"
-          (toString instance.fitRms)
-          "--report"
-          "${cfg.stateDirectory}/reports/${name}.json"
-        ]
-        ++ lib.optional instance.allowDegraded "--allow-degraded";
     in
     ''
       (
         set -e
         destination=${quote destination}
-        stage=$(mktemp -u ${quote "${cfg.stateDirectory}/staging/${name}.XXXXXXXXXXXX"})
-        mkdir -m 0770 "$stage"
+        stage=${quote "${cfg.stateDirectory}/staging/batch/${name}"}
         publication=""
         pointer=""
         trap 'rm -rf -- "$stage"; if [ -n "$publication" ]; then rm -rf -- "$publication"; fi; if [ -n "$pointer" ]; then rm -f -- "$pointer"; fi' EXIT
-        ${executable} process ${lib.escapeShellArgs args} --output "$stage"
+        if [ -f "$stage/report.json" ]; then
+          mv -f "$stage/report.json" ${quote "${cfg.stateDirectory}/reports/${name}.json"}
+        else
+          exit 1
+        fi
+        jq -e '.status == "passed"' ${quote "${cfg.stateDirectory}/reports/${name}.json"} > /dev/null
         candidate=$(mktemp -u "$destination/.generations/.stage.XXXXXXXXXXXX")
         mkdir -m 0770 "$candidate"
         publication=$candidate
@@ -285,7 +290,14 @@ let
           \( -name '*.gz' -o -name '*.br' \) -print0)
       '') (names ++ [ ".manifest" ])}
       failed=0
+      if ! ${executable} process --variants ${variantsFile} \
+        --cache ${quote cfg.cacheDirectory} \
+        --output ${quote "${cfg.stateDirectory}/staging/batch"} \
+        ${lib.optionalString (cfg.build.threads != null) "--threads ${toString cfg.build.threads}"}; then
+        failed=1
+      fi
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList buildOne instances)}
+      rm -rf -- ${quote "${cfg.stateDirectory}/staging/batch"}
       ${buildManifest}
       ${lib.concatMapStringsSep "\n" generationCleanup (names ++ [ ".manifest" ])}
       exit "$failed"
@@ -505,10 +517,17 @@ in
         description = "Optional source URL fallback chains, indexed by CLI source role.";
       };
     };
-    build.timeout = mkOption {
-      type = types.str;
-      default = "15min";
-      description = "Maximum build and publication service run time.";
+    build = {
+      timeout = mkOption {
+        type = types.str;
+        default = "15min";
+        description = "Maximum build and publication service run time.";
+      };
+      threads = mkOption {
+        type = types.nullOr (types.ints.between 1 65535);
+        default = null;
+        description = "Maximum processing threads shared by all instances. Null uses the available CPU thread count at run time. At most this many instances are processed at the same time.";
+      };
     };
     compression = {
       threads = mkOption {
@@ -551,13 +570,15 @@ in
       };
       cpuQuota = mkOption {
         type = types.str;
-        default = "100%";
-        description = "CPU time limit for each service.";
+        default = if cfg.build.threads == null then "" else "${toString (cfg.build.threads * 100)}%";
+        defaultText = "No quota with automatic worker selection; otherwise 100% per processing thread";
+        description = "CPU time limit for each service. An empty string sets no quota.";
       };
       tasksMax = mkOption {
-        type = types.ints.positive;
-        default = 64;
-        description = "Task limit for each service.";
+        type = types.either types.ints.positive (types.enum [ "infinity" ]);
+        default = if cfg.build.threads == null then "infinity" else lib.max 64 (cfg.build.threads + 16);
+        defaultText = "No task limit with automatic worker selection; otherwise at least 64 and 16 more than the worker count";
+        description = "Task limit for each service. Infinity permits automatic worker selection on hosts with many CPU threads.";
       };
     };
     retention = {

@@ -9,6 +9,7 @@ use crate::{
     time::Instant,
 };
 use anyhow::{Context, Result, ensure};
+use rayon::prelude::*;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -485,119 +486,139 @@ pub fn assemble(
     for &system in systems {
         let name = format!("HW_PGNSS_{}", system.name());
         let policy = &plan.products[&name];
-        let mut epochs = Vec::new();
         let mut tail = false;
-        for time in at.grid(system) {
-            let width = if system == System::Qzs {
-                7200.0
-            } else {
-                3600.0
-            };
-            let orbit = if let Some(fallback) = policy.beyond_horizon {
-                if tail
-                    || !inputs.covers(
-                        system,
-                        policy.orbit,
-                        time as f64 - width,
-                        time as f64 + width,
-                        at,
-                    )
-                {
-                    tail = true;
-                    fallback
+        let schedule: Vec<_> = at
+            .grid(system)
+            .into_iter()
+            .map(|time| {
+                let width = if system == System::Qzs {
+                    7200.0
+                } else {
+                    3600.0
+                };
+                let orbit = if let Some(fallback) = policy.beyond_horizon {
+                    if tail
+                        || !inputs.covers(
+                            system,
+                            policy.orbit,
+                            time as f64 - width,
+                            time as f64 + width,
+                            at,
+                        )
+                    {
+                        tail = true;
+                        fallback
+                    } else {
+                        policy.orbit
+                    }
                 } else {
                     policy.orbit
-                }
-            } else {
-                policy.orbit
-            };
-            let clock = if orbit != policy.orbit {
-                orbit
-            } else {
-                policy.clock
-            };
-            let hashes = inputs
-                .sources
-                .iter()
-                .filter(|s| {
-                    s.role == Role::Broadcast
-                        || s.role == Role::Antex
-                        || Some(s.role) == Inputs::role(orbit)
-                        || s.role == Role::Seed && (orbit == "hiee" || clock == "hiee")
-                })
-                .map(|s| s.sha256.clone())
-                .collect();
-            let mut report = EpochReport {
-                system,
-                time,
-                orbit: orbit.into(),
-                clock: clock.into(),
-                actual_orbit_providers: inputs.provider_names(orbit),
-                actual_clock_providers: inputs.provider_names(clock),
-                source_hashes: hashes,
-                counts: Vec::new(),
-                fit_rms_max_m: 0.0,
-                quantized_rms_max_m: 0.0,
-                removals: Vec::new(),
-            };
-            let mut blocks = Vec::new();
-            let mut screened_ids = BTreeSet::new();
-            for id in inputs.ids(system, orbit) {
-                if system == System::Bds && (id <= 5 || id >= 59) {
-                    report.removals.push(format!("{id}: GEO excluded"));
-                    continue;
-                }
-                let screen = (|| -> Result<()> {
-                    let nav = inputs
-                        .broadcast
-                        .nearest(system, id, at.gps() as f64)
-                        .context("absent from fresh broadcast")?;
-                    ensure!(nav.healthy(), "broadcast satellite unhealthy");
-                    let reference = nav.state(at.gps() as f64)?;
-                    let candidate = inputs.state(system, id, at.gps() as f64, orbit)?;
-                    let distance = (0..3)
-                        .map(|i| (reference.position[i] - candidate.position[i]).powi(2))
-                        .sum::<f64>()
-                        .sqrt();
-                    ensure!(
-                        distance <= 200.0,
-                        "independent broadcast position differs by {distance:.1} m"
-                    );
-                    Ok(())
-                })();
-                match screen {
-                    Ok(()) => {
-                        screened_ids.insert(id);
-                        product.screened += 1;
+                };
+                let clock = if orbit != policy.orbit {
+                    orbit
+                } else {
+                    policy.clock
+                };
+                (time, orbit, clock)
+            })
+            .collect();
+        let results: Vec<Result<_>> = schedule
+            .par_iter()
+            .map(|&(time, orbit, clock)| {
+                let hashes = inputs
+                    .sources
+                    .iter()
+                    .filter(|s| {
+                        s.role == Role::Broadcast
+                            || s.role == Role::Antex
+                            || Some(s.role) == Inputs::role(orbit)
+                            || s.role == Role::Seed && (orbit == "hiee" || clock == "hiee")
+                    })
+                    .map(|s| s.sha256.clone())
+                    .collect();
+                let mut report = EpochReport {
+                    system,
+                    time,
+                    orbit: orbit.into(),
+                    clock: clock.into(),
+                    actual_orbit_providers: inputs.provider_names(orbit),
+                    actual_clock_providers: inputs.provider_names(clock),
+                    source_hashes: hashes,
+                    counts: Vec::new(),
+                    fit_rms_max_m: 0.0,
+                    quantized_rms_max_m: 0.0,
+                    removals: Vec::new(),
+                };
+                let mut blocks = Vec::new();
+                let mut screened_ids = BTreeSet::new();
+                for id in inputs.ids(system, orbit) {
+                    if system == System::Bds && (id <= 5 || id >= 59) {
+                        report.removals.push(format!("{id}: GEO excluded"));
+                        continue;
                     }
-                    Err(e) => report.removals.push(format!("{id}: {e:#}")),
-                }
-            }
-            for block in 0..system.subblocks() {
-                let mut records = Vec::new();
-                for &id in &screened_ids {
-                    let result = if system == System::Glonass {
-                        glonass(inputs, id, time, block, orbit, clock, at).map(|b| (b, 0.0, 0.0))
-                    } else {
-                        kepler(inputs, system, id, time as f64, orbit, fit_limit, at)
-                    };
-                    match result {
-                        Ok((bytes, rms, quantized)) => {
-                            records.push(bytes);
-                            report.fit_rms_max_m = report.fit_rms_max_m.max(rms);
-                            report.quantized_rms_max_m = report.quantized_rms_max_m.max(quantized);
+                    let screen = (|| -> Result<()> {
+                        let nav = inputs
+                            .broadcast
+                            .nearest(system, id, at.gps() as f64)
+                            .context("absent from fresh broadcast")?;
+                        ensure!(nav.healthy(), "broadcast satellite unhealthy");
+                        let reference = nav.state(at.gps() as f64)?;
+                        let candidate = inputs.state(system, id, at.gps() as f64, orbit)?;
+                        let distance = (0..3)
+                            .map(|i| (reference.position[i] - candidate.position[i]).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        ensure!(
+                            distance <= 200.0,
+                            "independent broadcast position differs by {distance:.1} m"
+                        );
+                        Ok(())
+                    })();
+                    match screen {
+                        Ok(()) => {
+                            screened_ids.insert(id);
                         }
-                        Err(e) => report.removals.push(format!("{id} block {block}: {e:#}")),
+                        Err(e) => report.removals.push(format!("{id}: {e:#}")),
                     }
                 }
-                report.counts.push(records.len());
-                blocks.push(records);
-            }
-            epochs.push(Epoch {
-                time: u32::try_from(time)?,
-                blocks,
-            });
+                for block in 0..system.subblocks() {
+                    let mut records = Vec::new();
+                    for &id in &screened_ids {
+                        let result = if system == System::Glonass {
+                            glonass(inputs, id, time, block, orbit, clock, at)
+                                .map(|b| (b, 0.0, 0.0))
+                        } else {
+                            kepler(inputs, system, id, time as f64, orbit, fit_limit, at)
+                        };
+                        match result {
+                            Ok((bytes, rms, quantized)) => {
+                                records.push(bytes);
+                                report.fit_rms_max_m = report.fit_rms_max_m.max(rms);
+                                report.quantized_rms_max_m =
+                                    report.quantized_rms_max_m.max(quantized);
+                            }
+                            Err(e) => report.removals.push(format!("{id} block {block}: {e:#}")),
+                        }
+                    }
+                    report.counts.push(records.len());
+                    blocks.push(records);
+                }
+                Ok((
+                    Epoch {
+                        time: u32::try_from(time)?,
+                        blocks,
+                    },
+                    report,
+                    screened_ids.len(),
+                ))
+            })
+            .collect();
+        let mut epochs = Vec::with_capacity(results.len());
+        for result in results {
+            let (epoch, report, screened) = result?;
+            epochs.push(epoch);
             product.epochs.push(report);
+            product.screened += screened;
         }
         product
             .files

@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rayon::prelude::*;
+use serde::Deserialize;
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Mutex,
 };
 use weinav_forge::{
     build, cache, fetch, gate, pack,
@@ -34,10 +37,10 @@ enum Command {
     Process(Process),
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct Common {
     #[arg(long, value_enum, help = "Select the source policy.")]
-    flavor: Flavor,
+    flavor: Option<Flavor>,
     #[arg(
         long,
         value_enum,
@@ -74,6 +77,7 @@ struct Common {
 }
 
 #[derive(Args)]
+#[command(mut_arg("flavor", |arg| arg.required(true)))]
 struct Fetch {
     #[command(flatten)]
     common: Common,
@@ -87,10 +91,15 @@ struct Fetch {
     url: Vec<String>,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
+#[command(mut_arg("flavor", |arg| arg.required_unless_present("variants")))]
 struct Process {
     #[command(flatten)]
     common: Common,
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["flavor", "systems", "no_agnss", "source", "manifest", "report", "fit_rms", "allow_degraded", "development_bypass_gates"], help = "Build the variants in this JSON file. Use one output directory per name.")]
+    variants: Option<PathBuf>,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..), help = "Set the maximum number of processing threads. Default: available CPU threads.")]
+    threads: Option<u16>,
     #[arg(
         long,
         help = "Read this manifest instead of the flavor manifest in the cache."
@@ -117,6 +126,62 @@ struct Process {
     allow_degraded: bool,
     #[arg(long, hide = true)]
     development_bypass_gates: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Variant {
+    name: String,
+    flavor: Flavor,
+    #[serde(default = "all_systems")]
+    systems: Vec<String>,
+    #[serde(default = "include_agnss")]
+    agnss: bool,
+    #[serde(default = "default_fit_rms")]
+    fit_rms: f64,
+    #[serde(default)]
+    allow_degraded: bool,
+}
+
+fn all_systems() -> Vec<String> {
+    System::ALL
+        .iter()
+        .map(|s| s.name().to_ascii_lowercase())
+        .collect()
+}
+
+fn include_agnss() -> bool {
+    true
+}
+
+fn default_fit_rms() -> f64 {
+    1.0
+}
+
+fn variants(options: &Process) -> Result<Vec<Process>> {
+    let Some(path) = &options.variants else {
+        return Ok(vec![options.clone()]);
+    };
+    let variants: Vec<Variant> = serde_json::from_slice(&cache::read(path)?)?;
+    ensure!(!variants.is_empty(), "select at least one variant");
+    let mut names = BTreeSet::new();
+    variants.into_iter().map(|variant| {
+        ensure!(
+            variant.name.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && variant.name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "variant name must start with a letter or digit and contain only ASCII letters, digits, underscores or hyphens"
+        );
+        ensure!(names.insert(variant.name.clone()), "duplicate variant name: {}", variant.name);
+        let mut item = options.clone();
+        item.variants = None;
+        item.common.flavor = Some(variant.flavor);
+        item.common.systems = variant.systems.iter().map(|s| System::from_str(s, false).map_err(anyhow::Error::msg)).collect::<Result<_>>()?;
+        item.common.no_agnss = !variant.agnss;
+        item.fit_rms = variant.fit_rms;
+        item.allow_degraded = variant.allow_degraded;
+        item.output = options.output.join(variant.name);
+        Ok(item)
+    }).collect()
 }
 
 fn assignments(values: &[String]) -> Result<BTreeMap<Role, Vec<String>>> {
@@ -170,8 +235,9 @@ fn remove_output(path: &Path) -> Result<()> {
     }
 }
 
-fn process(options: Process, at: Instant) -> Result<u8> {
+fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<u8> {
     let common = &options.common;
+    let flavor = common.flavor.context("select a flavor")?;
     ensure!(
         options.fit_rms.is_finite() && options.fit_rms > 0.0,
         "fit RMS must be finite and positive"
@@ -192,21 +258,27 @@ fn process(options: Process, at: Instant) -> Result<u8> {
     );
     fs::create_dir_all(&options.output)?;
     let started = std::time::Instant::now();
-    let inputs = match build::Inputs::load(
-        &common.cache,
-        options.manifest.as_deref(),
-        common.flavor,
-        &common.systems,
-        !common.no_agnss,
-        &local,
-    ) {
+    let loaded = {
+        let _guard = source_loading
+            .lock()
+            .map_err(|e| anyhow::anyhow!("source loading lock failed: {e}"))?;
+        build::Inputs::load(
+            &common.cache,
+            options.manifest.as_deref(),
+            flavor,
+            &common.systems,
+            !common.no_agnss,
+            &local,
+        )
+    };
+    let inputs = match loaded {
         Ok(inputs) => inputs,
         Err(e) => {
             remove_output(&zip_path)?;
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"plan":Plan::new(common.flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Source unavailable: {e:#}");
@@ -215,7 +287,7 @@ fn process(options: Process, at: Instant) -> Result<u8> {
     };
     let products = match build::assemble(
         &inputs,
-        common.flavor,
+        flavor,
         &common.systems,
         !common.no_agnss,
         at,
@@ -227,7 +299,7 @@ fn process(options: Process, at: Instant) -> Result<u8> {
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"plan":Plan::new(common.flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Output refused: {e:#}");
@@ -237,7 +309,7 @@ fn process(options: Process, at: Instant) -> Result<u8> {
     let mut checks = gate::inspect(
         &products,
         &inputs,
-        common.flavor,
+        flavor,
         &common.systems,
         !common.no_agnss,
         at,
@@ -285,7 +357,7 @@ fn process(options: Process, at: Instant) -> Result<u8> {
         .iter()
         .map(|(n, b)| (n, cache::hash(b)))
         .collect();
-    let report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"plan":Plan::new(common.flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
+    let report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
     cache::atomic_write(&report_path, &serde_json::to_vec_pretty(&report)?)?;
     if accepted {
         cache::atomic_write(&zip_path, &packed.unwrap())?;
@@ -301,31 +373,92 @@ fn process(options: Process, at: Instant) -> Result<u8> {
     }
 }
 
-fn run(cli: Cli) -> Result<u8> {
-    let common = match &cli.command {
-        Command::Fetch(o) => &o.common,
-        Command::Process(o) => &o.common,
-    };
-    let at = validate(common)?;
-    if common.plan {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Plan::new(
-                common.flavor,
-                &common.systems,
-                !common.no_agnss
-            ))?
+impl Process {
+    fn worker_count(&self) -> usize {
+        self.threads.map_or_else(
+            || std::thread::available_parallelism().map_or(1, |count| count.get()),
+            usize::from,
+        )
+    }
+}
+
+fn process_all(options: Process) -> Result<u8> {
+    let at = validate(&options.common)?;
+    let variants = variants(&options)?;
+    for variant in &variants {
+        validate(&variant.common)?;
+        ensure!(
+            variant.fit_rms.is_finite() && variant.fit_rms > 0.0,
+            "fit RMS must be finite and positive"
         );
+    }
+    if options.common.plan {
+        let plans: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let common = &variant.common;
+                Plan::new(common.flavor.unwrap(), &common.systems, !common.no_agnss)
+            })
+            .collect();
+        let value = if options.variants.is_some() {
+            serde_json::to_value(&plans)?
+        } else {
+            serde_json::to_value(&plans[0])?
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(0);
     }
+    let threads = options.worker_count();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()?;
+    let mut code = 0;
+    let source_loading = Mutex::new(());
+    for chunk in variants.chunks(threads) {
+        let results: Vec<_> = pool.install(|| {
+            chunk
+                .par_iter()
+                .map(|variant| process(variant.clone(), at, &source_loading))
+                .collect()
+        });
+        for result in results {
+            let status = match result {
+                Ok(status) => status,
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    1
+                }
+            };
+            if code != 1 && status != 0 {
+                code = if status == 1 { 1 } else { code.max(status) };
+            }
+        }
+    }
+    Ok(code)
+}
+
+fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         Command::Fetch(options) => {
             let common = options.common;
+            let at = validate(&common)?;
+            let flavor = common.flavor.context("select a flavor")?;
+            if common.plan {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&Plan::new(
+                        flavor,
+                        &common.systems,
+                        !common.no_agnss
+                    ))?
+                );
+                return Ok(0);
+            }
             let local = local(&common)?;
             let urls = assignments(&options.url)?;
             match fetch::run(fetch::Options {
                 cache: &common.cache,
-                flavor: common.flavor,
+                flavor,
                 systems: &common.systems,
                 agnss: !common.no_agnss,
                 at,
@@ -337,10 +470,7 @@ fn run(cli: Cli) -> Result<u8> {
                     println!(
                         "Saved {} sources in {}",
                         manifest.sources.len(),
-                        common
-                            .cache
-                            .join(fetch::manifest_name(common.flavor))
-                            .display()
+                        common.cache.join(fetch::manifest_name(flavor)).display()
                     );
                     Ok(0)
                 }
@@ -350,7 +480,7 @@ fn run(cli: Cli) -> Result<u8> {
                 }
             }
         }
-        Command::Process(options) => process(options, at),
+        Command::Process(options) => process_all(options),
     }
 }
 
@@ -361,5 +491,40 @@ fn main() -> ExitCode {
             eprintln!("Error: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn processing_defaults_to_available_cpu_threads_and_accepts_an_override() {
+        let Command::Process(automatic) =
+            Cli::try_parse_from(["weinav-forge", "process", "--flavor", "huawei"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected processing command");
+        };
+        assert!(automatic.threads.is_none());
+        assert_eq!(
+            automatic.worker_count(),
+            std::thread::available_parallelism().unwrap().get()
+        );
+        let Command::Process(explicit) = Cli::try_parse_from([
+            "weinav-forge",
+            "process",
+            "--variants",
+            "variants.json",
+            "--threads",
+            "3",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected processing command");
+        };
+        assert_eq!(explicit.worker_count(), 3);
     }
 }

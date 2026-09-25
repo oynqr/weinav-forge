@@ -21,8 +21,8 @@ The flake supports ``x86_64-linux`` and ``aarch64-linux``.
 Source policy
 -------------
 
-Both commands require an explicit flavor. Use ``--plan`` to see its source
-policy without reading or downloading source files::
+Select a flavor for each build. Use ``--plan`` to see its source policy
+without reading or downloading source files::
 
   weinav-forge fetch --flavor huawei-plus --plan
 
@@ -95,6 +95,47 @@ The NixOS module below manages a separate published directory.
 
 Exit status is 0 for success, 2 for a command-line parsing error, 3 when a
 source is unavailable, 4 when output is refused, and 1 for another error.
+
+Build multiple variants
+-----------------------
+
+Use ``process --variants PATH`` to build a list of variants in one command.
+For example, save this JSON list as ``variants.json``::
+
+  [
+    {"name": "watch", "flavor": "huawei-plus"},
+    {
+      "name": "gps-only",
+      "flavor": "huawei",
+      "systems": ["gps"],
+      "agnss": false
+    }
+  ]
+
+Fetch the sources for each flavor, then run::
+
+  weinav-forge process --variants variants.json --cache ./cache \
+    --output ./staging --threads 2
+
+Each variant gets ``ephemeris.zip`` and ``report.json`` in
+``./staging/NAME/``. Names must be unique. Use only ASCII letters, digits,
+underscores and hyphens. The first character must be a letter or digit.
+
+Each entry requires ``name`` and ``flavor``. Optional fields are ``systems``
+(all five by default), ``agnss`` (true), ``fit_rms`` (1 metre), and
+``allow_degraded`` (false). Use the constellation names shown above.
+Set these fields in the file. Do not combine ``--variants`` with individual
+variant options, ``--source``, ``--manifest`` or ``--report``.
+``--at`` applies to all variants. ``--plan`` prints their plans in list order.
+
+``--threads`` applies to single builds and to variant lists. It sets the
+maximum number of processing threads. The default is the available CPU
+thread count. Variants share this limit. More threads can reduce build time
+and increase memory use. Use ``--threads 1`` to process on one thread.
+
+A failed variant does not stop the other variants. Exit status is 1 if any
+variant has an error, otherwise 4 if any output is refused, otherwise 3 if
+any source is unavailable, otherwise 0.
 
 NixOS service
 -------------
@@ -174,8 +215,15 @@ Common options under ``services.weinav-forge`` are:
 * ``fetch.timerConfig``: systemd timer settings. Set ``OnCalendar`` to change
   the schedule. ``fetch.sourceUrls`` sets URL fallback chains by source role.
 * ``fetch.timeout`` and ``build.timeout``: default 15 minutes each.
-* ``limits.memoryMax``, ``limits.cpuQuota`` and ``limits.tasksMax``: default
-  ``1G``, ``100%`` and 64 for each service.
+* ``build.threads``: processing thread limit shared by all instances,
+  default ``null``. This selects the available CPU thread count when the
+  service starts. All instances build in one command.
+* ``limits.memoryMax``: default ``1G`` for each service.
+* ``limits.cpuQuota``: default ``""`` (no quota) with automatic thread
+  selection, or ``100%`` per thread with an explicit ``build.threads``.
+* ``limits.tasksMax``: default ``"infinity"`` with automatic thread
+  selection. An explicit ``build.threads`` sets the default to at least 64
+  tasks and 16 more than the thread count. This limit applies to each service.
 * ``retention.generations``: keep at least 3 recent output versions per
   instance. ``retention.minimumGenerationAgeHours`` defaults to 24. Cleanup
   always keeps the published version, regardless of its age.

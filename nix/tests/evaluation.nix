@@ -38,6 +38,7 @@ let
       cacheDirectory = "/srv/gnss-cache";
       stateDirectory = "/srv/gnss-state";
       outputDirectory = "/srv/gnss-public";
+      build.threads = 80;
       instances.first = {
         flavor = "huawei";
         systems = [ "gps" ];
@@ -107,6 +108,11 @@ assert lib.hasInfix "application/json" (
 assert
   enabled.systemd.services.weinav-forge-fetch.unitConfig.OnSuccess == "weinav-forge-build.service";
 assert enabled.systemd.services.weinav-forge-build.serviceConfig.PrivateNetwork;
+assert enabled.systemd.services.weinav-forge-build.serviceConfig.CPUQuota == "";
+assert enabled.systemd.services.weinav-forge-build.serviceConfig.TasksMax == "infinity";
+assert enabled.services.weinav-forge.build.threads == null;
+assert custom.systemd.services.weinav-forge-build.serviceConfig.CPUQuota == "8000%";
+assert custom.systemd.services.weinav-forge-build.serviceConfig.TasksMax == 96;
 assert enabled.systemd.services.weinav-forge-fetch.serviceConfig.DynamicUser;
 assert enabled.systemd.services.weinav-forge-build.serviceConfig.DynamicUser;
 assert !(enabled.users.users ? weinav-fetch);

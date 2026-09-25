@@ -15,13 +15,11 @@ let
       command=$1
       shift
       output=""
-      report=""
-      flavor=""
+      variants=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --output) output=$2; shift 2 ;;
-          --report) report=$2; shift 2 ;;
-          --flavor) flavor=$2; shift 2 ;;
+          --variants) variants=$2; shift 2 ;;
           --no-agnss|--allow-degraded) shift ;;
           *) shift 2 ;;
         esac
@@ -48,18 +46,27 @@ let
         touch ${state}/paused
         sleep 120
       fi
-      if [ -f ${cache}/fail-process ] || { [ "$flavor" = open-plus ] && [ -f ${cache}/fail-secondary ]; }; then
-        printf '{"status":"refused"}\n' > "$report"
-        exit 4
-      fi
-      mkdir -p "$output"
+      printf 'process\n' >> ${state}/process-invocations
+      test -n "$variants"
+      root=$output
+      failed=0
       stamp=$(date +%s%3N)
       if [ -f ${cache}/old-time ]; then stamp=1600000000000; fi
-      printf '%s' "$stamp" > "$output/time"
-      cat ${cache}/source > "$output/payload"
-      jq -n --argjson stamp "$stamp" '{status:"passed",timestamp_ms:$stamp}' > "$report"
-      cd "$output"
-      zip -q -0 ephemeris.zip time payload
+      while IFS=$'\t' read -r name flavor; do
+        output="$root/$name"
+        mkdir -p "$output"
+        report="$output/report.json"
+        if [ -f ${cache}/fail-process ] || { [ "$flavor" = open-plus ] && [ -f ${cache}/fail-secondary ]; }; then
+          printf '{"status":"refused"}\n' > "$report"
+          failed=4
+          continue
+        fi
+        printf '%s' "$stamp" > "$output/time"
+        cat ${cache}/source > "$output/payload"
+        jq -n --argjson stamp "$stamp" '{status:"passed",timestamp_ms:$stamp}' > "$report"
+        (cd "$output"; zip -q -0 ephemeris.zip time payload)
+      done < <(jq -r '.[] | [.name, .flavor] | @tsv' "$variants")
+      exit "$failed"
     '';
   };
   compressor =
@@ -194,6 +201,7 @@ pkgs.testers.runNixOSTest {
         raise
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
     machine.succeed("systemctl stop weinav-forge-fetch.timer")
+    machine.succeed("test $(wc -l < ${state}/process-invocations) -eq 1")
 
     def current():
         return machine.succeed("readlink ${public}/watch/current").strip()

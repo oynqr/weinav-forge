@@ -72,6 +72,20 @@ Select an available CPU instead of CPU 0 if necessary. For a service build,
 save the executable from ``nix build`` and repeat the same comparison.
 This checks the static executable with its own math library.
 
+Set ``--threads 1`` for a single-thread comparison. For parallel builds,
+select enough CPUs with ``taskset`` and use the same thread limit in both
+commands. Also measure peak memory for a variant list: each active variant
+keeps its own source data. Source loading is serial to limit temporary
+memory use. Orbit calculations and variants share one worker pool.
+
+The batch comparison test needs a cache with Huawei and Huawei-plus sources.
+The three-system Huawei-plus build must pass its checks at the selected
+time. Run it with::
+
+  WEINAV_PROCESS_CACHE="$BENCH_CACHE" WEINAV_PROCESS_AT="$BENCH_AT" \
+    nix develop -c cargo test --release --test cli \
+    parallel_batches_preserve_payloads_reports_and_partial_success -- --ignored
+
 Use the profiling build to keep symbols for samply::
 
   nix develop -c cargo build --profile profiling
