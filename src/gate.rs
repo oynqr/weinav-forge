@@ -156,10 +156,10 @@ pub fn inspect(
         let mut live_epochs = 0;
         let mut unexpected_empty = false;
         let mut too_thin = false;
+        let mut smallest_live_block = None;
         let minimum = match system {
-            System::Gps | System::Bds => 29,
-            System::Glonass => 18,
-            System::Galileo => 17,
+            System::Gps | System::Bds | System::Glonass => 6,
+            System::Galileo => 4,
             System::Qzs => 0,
         };
         for epoch in &epochs {
@@ -180,6 +180,10 @@ pub fn inspect(
                 } else {
                     unexpected_empty |= block.is_empty() && system != System::Qzs;
                     too_thin |= block.len() < minimum;
+                    smallest_live_block = Some(
+                        smallest_live_block
+                            .map_or(block.len(), |count: usize| count.min(block.len())),
+                    );
                 }
                 for bytes in block {
                     records += 1;
@@ -308,7 +312,8 @@ pub fn inspect(
             &name,
             !too_thin,
             format!(
-                "minimum {minimum} satellites per live block; declared open horizon gaps exempt"
+                "smallest live block: {} satellites; required minimum: {minimum}; declared open horizon gaps exempt",
+                smallest_live_block.unwrap_or(0)
             ),
         );
         let first = epochs.first().map(|e| i64::from(e.time));

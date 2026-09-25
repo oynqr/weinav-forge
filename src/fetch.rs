@@ -20,6 +20,15 @@ use std::{
 };
 use url::Url;
 
+const CODE_BASE: &str = "https://zhw-b.s3.cloud.switch.ch/aiub/CODE";
+
+fn code_prediction_url(day: chrono::DateTime<Utc>) -> String {
+    format!(
+        "{CODE_BASE}/COD0OPSPRD_{}0000_05D_05M_ORB.SP3",
+        day.format("%Y%j")
+    )
+}
+
 pub struct Options<'a> {
     pub cache: &'a Path,
     pub flavor: Flavor,
@@ -386,10 +395,7 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         let mut adjacent = Vec::new();
                         for offset in [-2, -1, 0, 1] {
                             let day = options.at.0 + chrono::Duration::days(offset);
-                            let url = format!(
-                                "https://www.aiub.unibe.ch/download/CODE/COD0OPSPRD_{}0000_05D_05M_ORB.SP3",
-                                day.format("%Y%j")
-                            );
+                            let url = code_prediction_url(day);
                             if url != source.url
                                 && let Ok((extra, _)) = fetcher.get(&url, role, "code5d", true)
                             {
@@ -458,8 +464,8 @@ fn candidates(role: Role, at: Instant) -> Vec<(String, String)> {
         Role::Agnss=>vec![("hw".into(),"https://geo-dre.platform.dbankcloud.com/higeo/v1/gnssinfo?type=0x0024".into())],
         Role::Prediction=>{
             let mut urls=Vec::new();
-            for offset in [0,-1,-2] {let date=day+chrono::Duration::days(offset);urls.push(("code5d".into(),format!("https://www.aiub.unibe.ch/download/CODE/COD0OPSPRD_{}0000_05D_05M_ORB.SP3",date.format("%Y%j"))));}
-            urls.extend([("code-ult".into(),"https://www.aiub.unibe.ch/download/CODE/COD.EPH_U".into()),("igs-ult".into(),format!("https://igs.bkg.bund.de/root_ftp/IGS/products/{week}/IGS0OPSULT_{}{:02}00_02D_15M_ORB.SP3.gz",day.format("%Y%j"),day.hour()/6*6))]);
+            for offset in [0,-1,-2] {let date=day+chrono::Duration::days(offset);urls.push(("code5d".into(),code_prediction_url(date)));}
+            urls.extend([("code-ult".into(),format!("{CODE_BASE}/COD.EPH_U")),("igs-ult".into(),format!("https://igs.bkg.bund.de/root_ftp/IGS/products/{week}/IGS0OPSULT_{}{:02}00_02D_15M_ORB.SP3.gz",day.format("%Y%j"),day.hour()/6*6))]);
             for offset in 0..3 {
                 let date=day-chrono::Duration::hours(3*offset);
                 let gps=Instant(date).gps();
@@ -583,6 +589,26 @@ fn ftp(url: &Url) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn code_sources_use_direct_storage_across_year_boundaries() -> Result<()> {
+        let at = Instant::parse("2026-01-01T00:00:00Z")?;
+        let urls = candidates(Role::Prediction, at);
+        for (index, stamp) in ["2026001", "2025365", "2025364"].iter().enumerate() {
+            assert_eq!(urls[index].0, "code5d");
+            assert_eq!(
+                urls[index].1,
+                format!(
+                    "https://zhw-b.s3.cloud.switch.ch/aiub/CODE/COD0OPSPRD_{stamp}0000_05D_05M_ORB.SP3"
+                )
+            );
+        }
+        assert_eq!(
+            urls[3].1,
+            "https://zhw-b.s3.cloud.switch.ch/aiub/CODE/COD.EPH_U"
+        );
+        Ok(())
+    }
 
     #[test]
     fn revalidates_http_encoding_and_reuses_hash_verified_cache() -> Result<()> {

@@ -149,7 +149,9 @@ let
         trap 'rm -rf -- "$stage"; if [ -n "$publication" ]; then rm -rf -- "$publication"; fi; if [ -n "$pointer" ]; then rm -f -- "$pointer"; fi' EXIT
         if [ -f "$stage/report.json" ]; then
           mv -f "$stage/report.json" ${quote "${cfg.stateDirectory}/reports/${name}.json"}
+          echo ${quote "Saved ${name} report: ${cfg.stateDirectory}/reports/${name}.json"}
         else
+          echo "No report was produced for ${name}" >&2
           exit 1
         fi
         jq -e '.status == "passed"' ${quote "${cfg.stateDirectory}/reports/${name}.json"} > /dev/null

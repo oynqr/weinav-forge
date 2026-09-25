@@ -365,6 +365,17 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
         Ok(0)
     } else {
         remove_output(&zip_path)?;
+        for check in &checks.checks {
+            if matches!(check.status, gate::Status::Fail) {
+                eprintln!(
+                    "{}: {} {} failed: {}",
+                    report_path.display(),
+                    check.product,
+                    check.id,
+                    check.detail
+                );
+            }
+        }
         eprintln!(
             "Output refused. Read {} for the failed checks.",
             report_path.display()

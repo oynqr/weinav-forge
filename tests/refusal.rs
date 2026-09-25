@@ -85,6 +85,82 @@ fn empty_inputs() -> Inputs {
 }
 
 #[test]
+fn live_block_census_allows_screening_but_rejects_sparse_output() -> Result<()> {
+    let at = Instant::parse("2026-09-25T19:00:00Z")?;
+    for (system, screened_count, minimum) in [
+        (System::Gps, 28, 6),
+        (System::Glonass, 17, 6),
+        (System::Galileo, 15, 4),
+        (System::Bds, 27, 6),
+    ] {
+        for block_count in [screened_count, minimum, minimum - 1, 0] {
+            let epochs = at
+                .grid(system)
+                .into_iter()
+                .enumerate()
+                .map(|(index, time)| {
+                    let blocks = (0..system.subblocks())
+                        .map(|block| {
+                            let count = if index == 18 && block == 0 {
+                                block_count
+                            } else {
+                                screened_count
+                            };
+                            (0..count)
+                                .map(|id| {
+                                    let mut values = record::zero_values(system);
+                                    values.insert(
+                                        if system == System::Glonass {
+                                            "slot"
+                                        } else {
+                                            "sv"
+                                        }
+                                        .into(),
+                                        f64::from(id),
+                                    );
+                                    record::encode(system, &values)
+                                })
+                                .collect::<Result<Vec<_>>>()
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(Epoch {
+                        time: time as u32,
+                        blocks,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let name = format!("HW_PGNSS_{}", system.name());
+            let products = Products {
+                files: BTreeMap::from([(name, record::container(system, &epochs)?)]),
+                epochs: vec![],
+                notes: vec![],
+                screened: 0,
+            };
+            let gate = gate::inspect(
+                &products,
+                &empty_inputs(),
+                Flavor::Huawei,
+                &[system],
+                false,
+                at,
+                false,
+            );
+            let check = gate.checks.iter().find(|check| check.id == "D2").unwrap();
+            assert_eq!(
+                matches!(check.status, gate::Status::Pass),
+                block_count >= minimum
+            );
+            assert!(
+                check
+                    .detail
+                    .contains(&format!("smallest live block: {block_count}"))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn declared_whole_grid_gaps_require_open_permission() -> Result<()> {
     let at = Instant::parse("2026-09-23T12:00:00Z")?;
     for system in [System::Bds, System::Qzs] {

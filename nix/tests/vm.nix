@@ -326,6 +326,11 @@ pkgs.testers.runNixOSTest {
     machine.fail("systemctl start weinav-forge-build")
     assert current() == first and digest() == first_digest
     assert check_manifest() == first_manifest
+    for name in ["watch", "secondary"]:
+        report = "${state}/reports/" + name + ".json"
+        assert json.loads(machine.succeed(f"cat {report}"))["status"] == "refused"
+        machine.succeed(f"journalctl -b -u weinav-forge-build --no-pager | grep -F 'Saved {name} report: {report}'")
+    machine.succeed("test -z \"$(ls -A ${state}/staging)\"")
     machine.succeed("rm ${cache}/fail-process; touch ${cache}/fail-compression")
     machine.fail("systemctl start weinav-forge-build")
     assert current() == first and digest() == first_digest

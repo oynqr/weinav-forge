@@ -254,3 +254,8 @@ Read service results and reports with::
 
   journalctl -u weinav-forge-fetch -u weinav-forge-build
   cat /var/lib/weinav-forge/reports/watch.json
+
+The service keeps each variant's latest report in the ``reports`` directory,
+including reports for refused output. The journal shows the saved report path
+and each failed check. Temporary report paths from processing are removed at
+the end of the build.
