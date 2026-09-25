@@ -34,16 +34,16 @@ jobs:
             system: aarch64-linux
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
       - name: Record the lock file hashes
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - name: Use the Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
       - name: Check the flake
         run: nix flake check --no-update-lock-file --print-build-logs
       - name: Build the tool
@@ -61,7 +61,7 @@ jobs:
       - name: Check that the lock files did not change
         run: sha256sum --check "$RUNNER_TEMP/lock-files.sha256"
       - name: Upload the binary
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: weinav-forge-${{ matrix.system }}
           path: binary/weinav-forge
@@ -72,21 +72,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
       - name: Record the lock file hashes
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - name: Use the Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
       - name: Check the format
         run: |
           nix shell --inputs-from . nixpkgs#nixfmt-rfc-style -c nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
           nix shell --inputs-from . nixpkgs#taplo -c taplo fmt --check Cargo.toml .cargo/config.toml
-          nix shell --inputs-from . nixpkgs#prettier -c prettier --check .github/workflows/*.yml
+          nix shell --inputs-from . nixpkgs#prettier -c prettier --check .github/dependabot.yml .github/workflows/*.yml
       - name: Lint the files
         run: |
           nix shell --inputs-from . nixpkgs#statix -c statix check
@@ -96,5 +96,18 @@ jobs:
             nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
               rst2pseudoxml --exit-status=1 "$document" > /dev/null
           done
+      - name: Check that external actions use full commit pins
+        run: |
+          references=$(sed -nE 's/^[[:space:]]+uses: (.*)$/\1/p' .github/workflows/*.yml)
+          test -n "$references"
+          while IFS= read -r reference; do
+            if [[ "$reference" == ./* ]]; then
+              continue
+            fi
+            if [[ ! "$reference" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$ ]]; then
+              echo "::error::External action must use a full commit SHA: $reference"
+              exit 1
+            fi
+          done <<< "$references"
       - name: Check that the lock files did not change
         run: sha256sum --check "$RUNNER_TEMP/lock-files.sha256"

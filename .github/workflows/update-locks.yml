@@ -24,14 +24,14 @@ jobs:
       base: ${{ steps.update.outputs.base }}
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - name: Use the Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
       - name: Update the lock files
         id: update
         run: |
@@ -47,7 +47,7 @@ jobs:
           fi
       - name: Save the updated lock files
         if: ${{ steps.update.outputs.changed == 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: updated-lock-files
           path: |
@@ -69,11 +69,11 @@ jobs:
       number: ${{ steps.pull-request.outputs.number }}
     steps:
       - name: Check out the update base
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.update.outputs.base }}
       - name: Get the updated lock files
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: updated-lock-files
       - name: Open the update pull request
@@ -150,7 +150,7 @@ jobs:
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           test "$state" = success
       - name: Check out the checked revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.pull-request.outputs.revision }}
           fetch-depth: 0

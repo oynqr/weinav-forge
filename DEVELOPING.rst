@@ -134,7 +134,7 @@ same tool versions as CI::
   nix shell --inputs-from . nixpkgs#taplo -c \
     taplo fmt --check Cargo.toml .cargo/config.toml
   nix shell --inputs-from . nixpkgs#prettier -c \
-    prettier --check .github/workflows/*.yml
+    prettier --check .github/dependabot.yml .github/workflows/*.yml
   nix shell --inputs-from . nixpkgs#actionlint -c \
     actionlint .github/workflows/*.yml
   nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
@@ -240,3 +240,23 @@ by fast-forward.
 
 Read the failed job's log before you retry an update. A new run creates a
 new update branch and pull request. Previous open pull requests stay open.
+
+GitHub Action updates
+---------------------
+
+External actions use full commit pins. Dependabot checks for action updates
+each Monday at 03:27 UTC and groups them in one pull request. The schedule
+is in ``.github/dependabot.yml``. Cargo and Nix lock files use the separate
+weekly workflow above, which keeps Cargo's minimum publication age.
+
+The normal pull request checks test the new action pins. After a successful
+build, ``merge action updates`` checks that Dependabot opened the pull
+request and that only action pins changed. It permits a fast-forward only
+when the tested head and base are still current and repository rules permit
+the merge. Otherwise, the pull request stays open. The merge workflow does
+not check out or execute code from the pull request.
+
+This setup uses Dependabot and the built-in ``GITHUB_TOKEN``. No personal
+access token or extra repository secret is required. The token must have
+permission to update the default branch by fast-forward. CI rejects
+external actions that do not use full commit pins.
