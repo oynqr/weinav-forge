@@ -234,7 +234,7 @@ impl Client {
                 }
                 if encoding.eq_ignore_ascii_case("gzip") {
                     ensure!(bytes.starts_with(&[0x1f, 0x8b]), "invalid HTTP gzip body");
-                    bytes = decompress(&bytes)?;
+                    bytes = decompress(&bytes)?.into_owned();
                 } else {
                     ensure!(
                         encoding.eq_ignore_ascii_case("identity"),

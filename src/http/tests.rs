@@ -87,7 +87,7 @@ fn huawei_headers_redirects_and_gzip_layers() -> Result<()> {
         let url = Url::parse(&format!("http://{AGNSS_HOST}:{port}/"))?;
         let response = client.get(&url, None, None)?;
         assert_eq!(response.bytes, product);
-        assert_eq!(decompress(&response.bytes)?, rtcm);
+        assert_eq!(decompress(&response.bytes)?.as_ref(), rtcm);
         fetch::validate(Role::Agnss, &response.bytes)?;
     }
     let requests = server.join().expect("HTTP test thread panicked")?;

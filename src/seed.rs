@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::io::Read;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -16,7 +16,7 @@ pub const COEFFICIENT_BITS: [usize; 20] = [
 ];
 pub const MAX_DECODED_BYTES: u64 = 128 * 1024 * 1024;
 
-pub fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
+pub fn decompress(bytes: &[u8]) -> Result<Cow<'_, [u8]>> {
     ensure!(
         bytes.len() as u64 <= MAX_DECODED_BYTES,
         "input exceeds size limit"
@@ -31,7 +31,7 @@ pub fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
             result.len() as u64 <= MAX_DECODED_BYTES,
             "decoded product exceeds size limit"
         );
-        Ok(result)
+        Ok(Cow::Owned(result))
     } else if bytes.starts_with(&[0x1f, 0x9d]) {
         let mut result = Vec::new();
         lzw_z::Decoder::new(bytes)
@@ -42,9 +42,9 @@ pub fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
             result.len() as u64 <= MAX_DECODED_BYTES,
             "decoded product exceeds size limit"
         );
-        Ok(result)
+        Ok(Cow::Owned(result))
     } else {
-        Ok(bytes.to_vec())
+        Ok(Cow::Borrowed(bytes))
     }
 }
 

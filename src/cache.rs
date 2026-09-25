@@ -48,11 +48,15 @@ pub fn hash(bytes: &[u8]) -> String {
 }
 
 pub fn read(path: &Path) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .with_context(|| format!("cannot open {}", path.display()))?
-        .take(MAX_DECODED_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    let file = fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let length = file.metadata()?.len();
+    ensure!(
+        length <= MAX_DECODED_BYTES,
+        "{} exceeds input size limit",
+        path.display()
+    );
+    let mut bytes = Vec::with_capacity(length as usize + 1);
+    file.take(MAX_DECODED_BYTES + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 <= MAX_DECODED_BYTES,
         "{} exceeds input size limit",
@@ -111,4 +115,23 @@ pub fn store_source(root: &Path, source: &Source, bytes: &[u8]) -> Result<()> {
         atomic_write(&path, bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_reads_preserve_bytes_and_enforce_the_size_limit() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("source");
+        fs::write(&path, [])?;
+        assert!(read(&path)?.is_empty());
+        let bytes: Vec<_> = (0..131_071).map(|i| (i % 256) as u8).collect();
+        fs::write(&path, &bytes)?;
+        assert_eq!(read(&path)?, bytes);
+        fs::File::create(&path)?.set_len(MAX_DECODED_BYTES + 1)?;
+        assert!(read(&path).unwrap_err().to_string().contains("size limit"));
+        Ok(())
+    }
 }

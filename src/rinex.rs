@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{TimeZone, Utc};
-use std::{collections::BTreeMap, f64::consts::PI};
+use std::{borrow::Cow, collections::BTreeMap, f64::consts::PI};
 
 #[path = "rinex_fields.rs"]
 mod schema;
@@ -17,7 +17,7 @@ pub struct Navigation {
     pub svid: u8,
     pub epoch: f64,
     pub system_epoch: f64,
-    pub values: BTreeMap<String, f64>,
+    pub values: BTreeMap<&'static str, f64>,
 }
 
 #[derive(Default)]
@@ -27,11 +27,13 @@ pub struct Broadcast {
 }
 
 pub fn number(text: &str) -> Result<f64> {
-    let value: f64 = text
-        .trim()
-        .replace(['D', 'd'], "e")
-        .parse()
-        .context("invalid numeric field")?;
+    let text = text.trim();
+    let normalized = if text.contains(['D', 'd']) {
+        Cow::Owned(text.replace(['D', 'd'], "e"))
+    } else {
+        Cow::Borrowed(text)
+    };
+    let value: f64 = normalized.parse().context("invalid numeric field")?;
     ensure!(value.is_finite(), "nonfinite numeric field");
     Ok(value)
 }
@@ -161,7 +163,7 @@ impl Broadcast {
             let values: BTreeMap<_, _> = names
                 .iter()
                 .zip(values)
-                .filter_map(|(name, value)| value.map(|v| ((*name).to_owned(), v)))
+                .filter_map(|(name, value)| value.map(|v| (*name, v)))
                 .collect();
             let nav = Navigation {
                 system,
@@ -322,12 +324,32 @@ impl Navigation {
     }
 
     pub fn semicircle_fields(&self) -> BTreeMap<String, f64> {
-        let mut values = self.values.clone();
+        let mut values: BTreeMap<String, f64> = self
+            .values
+            .iter()
+            .map(|(&key, &value)| (key.to_owned(), value))
+            .collect();
         for key in ["idot", "delta_n", "m0", "omega0", "i0", "omega", "omegadot"] {
             if let Some(value) = values.get_mut(key) {
                 *value /= PI;
             }
         }
         values
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_fields_accept_fortran_exponents_and_reject_nonfinite_values() -> Result<()> {
+        for field in [" 1.25E+01 ", " 1.25D+01 ", " 1.25d+01 ", " 12.5 "] {
+            assert_eq!(number(field)?, 12.5);
+        }
+        for field in ["NaN", "inf", "-inf", "1e999", "", "1D", "1.2.3"] {
+            assert!(number(field).is_err(), "accepted {field:?}");
+        }
+        Ok(())
     }
 }

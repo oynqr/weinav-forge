@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Default)]
 pub struct Inputs {
     pub sources: Vec<Source>,
     pub seed: Option<Seed>,
@@ -51,8 +52,7 @@ impl Inputs {
         agnss: bool,
         local: &BTreeMap<Role, Vec<PathBuf>>,
     ) -> Result<Self> {
-        let mut sources = Vec::new();
-        let mut raw: BTreeMap<Role, Vec<Vec<u8>>> = BTreeMap::new();
+        let mut inputs = Self::default();
         let required = Plan::new(flavor, systems, agnss).sources;
         let path = manifest
             .map(Path::to_path_buf)
@@ -67,10 +67,8 @@ impl Inputs {
                 if local.contains_key(&source.role) || !required.contains(&source.role) {
                     continue;
                 }
-                raw.entry(source.role)
-                    .or_default()
-                    .push(cache::load_source(cache_root, &source)?);
-                sources.push(source);
+                inputs.add_source(source.role, cache::load_source(cache_root, &source)?)?;
+                inputs.sources.push(source);
             }
         } else {
             ensure!(manifest.is_none(), "explicit manifest does not exist");
@@ -82,8 +80,7 @@ impl Inputs {
             );
             for path in paths {
                 let bytes = cache::read(path)?;
-                crate::fetch::validate(role, &bytes)?;
-                sources.push(Source {
+                inputs.sources.push(Source {
                     role,
                     provider: crate::fetch::provider(role).into(),
                     url: format!("local:{}", path.display()),
@@ -94,12 +91,12 @@ impl Inputs {
                     last_modified: None,
                     coverage: crate::fetch::inspect(role, &bytes)?,
                 });
-                raw.entry(role).or_default().push(bytes);
+                inputs.add_source(role, bytes)?;
             }
         }
         for role in required {
             ensure!(
-                raw.contains_key(&role)
+                inputs.sources.iter().any(|source| source.role == role)
                     || matches!(
                         role,
                         Role::Prediction | Role::BdsPrediction | Role::QzsPrediction
@@ -107,55 +104,36 @@ impl Inputs {
                 "required source is absent: {role:?}"
             );
         }
-        let seed = raw
-            .get(&Role::Seed)
-            .map(|b| {
-                ensure!(b.len() == 1, "supply one seed");
-                Seed::parse(&b[0])
-            })
-            .transpose()?;
-        let mut satellites = BTreeMap::new();
-        if let Some(seed) = &seed {
+        if let Some(seed) = &inputs.seed {
             for &system in systems {
-                satellites.insert(system, seed.nav(system)?);
+                inputs.satellites.insert(system, seed.nav(system)?);
+            }
+            if systems.contains(&System::Glonass) {
+                inputs.acceleration = Some(Acceleration::parse(seed)?);
             }
         }
-        let acceleration = if systems.contains(&System::Glonass) {
-            seed.as_ref().map(Acceleration::parse).transpose()?
-        } else {
-            None
-        };
-        let mut broadcast = Broadcast::default();
-        for bytes in &raw[&Role::Broadcast] {
-            broadcast.add(bytes)?;
-        }
-        let mut predictions = BTreeMap::new();
-        for role in [Role::Prediction, Role::BdsPrediction, Role::QzsPrediction] {
-            if let Some(files) = raw.get(&role) {
-                let mut p = Sp3::default();
-                for bytes in files {
-                    p.add(bytes)?;
-                }
-                predictions.insert(role, p);
+        Ok(inputs)
+    }
+
+    fn add_source(&mut self, role: Role, bytes: Vec<u8>) -> Result<()> {
+        match role {
+            Role::Seed => {
+                ensure!(self.seed.is_none(), "supply one seed");
+                self.seed = Some(Seed::parse(&bytes)?);
+            }
+            Role::Broadcast => self.broadcast.add(&bytes)?,
+            Role::Prediction | Role::BdsPrediction | Role::QzsPrediction => {
+                self.predictions.entry(role).or_default().add(&bytes)?;
+            }
+            Role::Antex => {
+                ensure!(self.antex.is_none(), "supply one ANTEX file");
+                self.antex = Some(Antex::parse(&bytes)?);
+            }
+            Role::Agnss | Role::GpsAlmanac | Role::GalileoAlmanac | Role::QzsAlmanac => {
+                self.raw.entry(role).or_default().push(bytes);
             }
         }
-        let antex = raw
-            .get(&Role::Antex)
-            .map(|b| {
-                ensure!(b.len() == 1, "supply one ANTEX file");
-                Antex::parse(&b[0])
-            })
-            .transpose()?;
-        Ok(Self {
-            sources,
-            seed,
-            satellites,
-            acceleration,
-            broadcast,
-            predictions,
-            antex,
-            raw,
-        })
+        Ok(())
     }
 
     pub fn role(provider: &str) -> Option<Role> {
@@ -497,7 +475,7 @@ pub fn assemble(
     }
     if agnss {
         let bytes = if matches!(flavor, Flavor::Huawei | Flavor::HuaweiPlus) {
-            crate::seed::decompress(&inputs.raw[&Role::Agnss][0])?
+            crate::seed::decompress(&inputs.raw[&Role::Agnss][0])?.into_owned()
         } else {
             crate::agnss::build(&inputs.broadcast, systems, at)?
         };
