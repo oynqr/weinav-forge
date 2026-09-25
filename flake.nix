@@ -147,6 +147,53 @@
 
           format = this.craneLib.cargoFmt { inherit (this.crateArgs) src; };
 
+          documentation =
+            this.pkgs.runCommand "weinav-forge-documentation"
+              {
+                src = lib.fileset.toSource {
+                  root = ./.;
+                  fileset = lib.fileset.fileFilter (file: file.hasExt "rst") ./.;
+                };
+
+                nativeBuildInputs = [
+                  (this.pkgs.python3.withPackages (python: [ python.docutils ]))
+                  this.pkgs.nixfmt
+                  this.pkgs.statix
+                ];
+              }
+              ''
+                mkdir examples
+                python - "$src" <<'PY'
+                import pathlib
+                import sys
+
+                from docutils import nodes
+                from docutils.core import publish_doctree
+
+                source = pathlib.Path(sys.argv[1])
+                count = 0
+                for document in sorted(source.rglob("*.rst")):
+                    tree = publish_doctree(
+                        document.read_text(),
+                        source_path=str(document),
+                        settings_overrides={"halt_level": 2, "syntax_highlight": "none"},
+                    )
+                    for block in tree.findall(nodes.literal_block):
+                        if "nix" in block["classes"]:
+                            count += 1
+                            example = pathlib.Path("examples") / f"{count}-{document.stem}.nix"
+                            example.write_text(block.astext() + "\n")
+                            print(f"{document.relative_to(source)}:{block.line}: {example}", flush=True)
+                print(f"Found {count} Nix examples", flush=True)
+                PY
+                shopt -s nullglob
+                for example in examples/*.nix; do
+                  nixfmt --check "$example"
+                done
+                statix check examples
+                touch "$out"
+              '';
+
           module-evaluation = import ./nix/tests/evaluation.nix {
             inherit nixpkgs system;
             inherit (this) pkgs;

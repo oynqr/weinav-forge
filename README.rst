@@ -142,7 +142,9 @@ NixOS service
 
 Import ``nixosModules.default`` from this flake. The alias
 ``nixosModules.weinav-forge`` provides the same module. For example, with the
-flake available as the ``weinav-forge`` input::
+flake available as the ``weinav-forge`` input:
+
+.. code-block:: nix
 
   {
     imports = [ inputs.weinav-forge.nixosModules.default ];
@@ -163,9 +165,14 @@ flake available as the ``weinav-forge`` input::
       enableACME = true;
       forceSSL = true;
     };
+
     security.acme.acceptTerms = true;
     security.acme.defaults.email = "admin@example.org";
-    networking.firewall.allowedTCPPorts = [ 80 443 ];
+
+    networking.firewall.allowedTCPPorts = [
+      80
+      443
+    ];
   }
 
 This instance serves ``/agnss/watch/ephemeris.zip``. Add an instance for each

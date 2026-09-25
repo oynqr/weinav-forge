@@ -148,6 +148,12 @@ longer. There is no RST formatter; docutils checks the RST syntax.
 Keep program use and service operation in ``README.rst``. Keep development
 and repository maintenance in this file.
 
+Mark each Nix example in an RST file with ``.. code-block:: nix``.
+The ``documentation`` flake check checks RST syntax and runs nixfmt and
+statix on these examples. Run it with::
+
+  nix build .#checks.x86_64-linux.documentation
+
 Huawei HTTP profile
 -------------------
 
