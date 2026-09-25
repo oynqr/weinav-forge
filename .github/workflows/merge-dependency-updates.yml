@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      pull-requests: write
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -32,6 +32,8 @@ jobs:
       PULL_REQUEST: ${{ github.event.workflow_run.pull_requests[0].number }}
     steps:
       - name: Verify and fast-forward the Dependabot pull request
+        env:
+          DEPENDABOT_REBASE_TOKEN: ${{ secrets.DEPENDABOT_REBASE_TOKEN }}
         run: |
           [[ "$BASE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CHECKED_REVISION" =~ ^[0-9a-f]{40}$ ]]
@@ -51,26 +53,35 @@ jobs:
           }
           request_rebase() {
             local current="$1"
-            local comparison body
+            local comparison body author_id
             [[ "$current" =~ ^[0-9a-f]{40}$ ]]
             comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REVISION...$current" --jq .status)
             if [ "$comparison" != ahead ] && [ "$comparison" != identical ]; then
               echo "::error::The default branch was rewritten. No rebase requested."
               exit 1
             fi
+            if [ -z "$DEPENDABOT_REBASE_TOKEN" ]; then
+              echo "::error::Set the DEPENDABOT_REBASE_TOKEN Actions secret to request a rebase."
+              exit 1
+            fi
+            if ! author_id=$(GH_TOKEN="$DEPENDABOT_REBASE_TOKEN" gh api user \
+              | jq -er 'select(.type == "User") | .id | select(type == "number" and . > 0)'); then
+              echo "::error::DEPENDABOT_REBASE_TOKEN must authenticate a user with push access."
+              exit 1
+            fi
             body=$(printf '@dependabot rebase\n\nRebase request for head %s onto base %s.' \
               "$CHECKED_REVISION" "$current")
             gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" \
               > "$RUNNER_TEMP/dependency-update-comments.json"
-            if jq -e --arg body "$body" 'add | any(.[];
-              .user.login == "github-actions[bot]" and .user.type == "Bot" and .body == $body)' \
+            if jq -e --arg body "$body" --argjson author_id "$author_id" 'add | any(.[];
+              .user.id == $author_id and .user.type == "User" and .body == $body)' \
               "$RUNNER_TEMP/dependency-update-comments.json" > /dev/null; then
               echo "A rebase was already requested for these head and base revisions."
               exit 0
             fi
             read_pull_request
             printf '%s' "$body" > "$RUNNER_TEMP/dependency-update-rebase.txt"
-            gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+            GH_TOKEN="$DEPENDABOT_REBASE_TOKEN" gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
               --body-file "$RUNNER_TEMP/dependency-update-rebase.txt"
             echo "Requested a Dependabot rebase. A new successful build is required before merging."
             exit 0

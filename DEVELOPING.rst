@@ -246,17 +246,25 @@ the signed Dependabot commits unchanged. Both tested branches must still be
 current, and repository rules must permit the update. No pull request code
 runs in the merge workflow.
 
-This setup uses the built-in ``GITHUB_TOKEN``. No personal access token or
-extra repository secret is required. The token needs permission to update
-the default branch by fast-forward and to comment on pull requests.
+The merge checks and fast-forward use the built-in ``GITHUB_TOKEN``.
+The token needs permission to update the default branch by fast-forward.
 Require the build and lint checks in the branch rules.
+
+For rebase comments, create a fine-grained personal access token from a
+user account with push access to this repository. Select only this
+repository and give the token ``Pull requests: Read and write`` permission.
+GitHub adds ``Metadata: Read-only`` permission. Save the token as the
+``DEPENDABOT_REBASE_TOKEN`` Actions repository secret. Use an Actions
+secret, not a Dependabot secret. Replace it before it expires.
 
 If the base branch advances or the checked branch needs a rebase, the
 workflow posts ``@dependabot rebase`` and leaves the pull request open.
-It sends at most one request for each head and base revision pair.
+It uses the personal token only to identify the user and post the comment.
+It sends at most one request from that user for each head and base revision
+pair. Old requests from ``github-actions[bot]`` do not prevent a new request.
 Dependabot must update the branch and the new build must pass before a
-merge can occur. If Dependabot does not respond to the automatic comment,
-post the command yourself.
+merge can occur. If the secret is absent or invalid, a required rebase
+fails the workflow. A pull request that needs no rebase can still merge.
 
 If a merge fails for another reason, read the workflow log. If a package is
 too new, rerun the failed merge job after the age limit. A failed
