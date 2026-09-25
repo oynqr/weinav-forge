@@ -161,8 +161,10 @@ Common options under ``services.weinav-forge`` are:
   the standard NixOS options.
 
 The three data directories must be separate. Do not use one as a parent of
-another. The module manages these directories and their cleanup. Increase
-the timer interval or service limits for many instances or a slower machine.
+another. Use a filesystem with POSIX access control lists for these
+directories. The module manages these directories and their cleanup.
+Increase the timer interval or service limits for many instances or a slower
+machine.
 
 Start a build from the cached source files with::
 

@@ -118,8 +118,34 @@ Service publication
 
 The fetch service gets the combined source data needed by enabled instances.
 The build service has no network access and reads the cache through a
-read-only mount. The services use separate unprivileged users. A shared lock
+read-only mount. The services use separate dynamic users. A shared lock
 prevents fetching, building and cleanup from running at the same time.
+
+Systemd assigns the ``weinav-fetch`` and ``weinav-build`` users for each run.
+These names differ from the old static user names, so an old account cannot
+prevent dynamic user allocation after an upgrade. Fixed groups control
+access to stored files. The fetch service uses ``weinav-forge-cache``. The
+build service uses ``weinav-forge-work`` and can read the cache. Nginx uses
+``weinav-forge-public`` to read published files, but cannot write them.
+
+Tmpfiles manages these shared directories, including custom paths. Their
+top directories belong to root and have no access for other users. The
+services cannot change those permissions. Thus a later user with a reused
+UID cannot access files left by an earlier run. Set-group-ID directories
+and default access control lists keep group access on new files. Tmpfiles
+also updates ownership and permissions on existing data during an upgrade.
+The filesystem must support POSIX access control lists.
+
+The shared directory lifetime is independent of either service. The module
+therefore uses tmpfiles instead of private ``StateDirectory`` and
+``CacheDirectory`` directories, which also limit access from other services.
+The root-owned lock file remains in place between runs. Neither worker can
+replace it. The services cannot execute files from the data directories.
+
+The VM test forces new UIDs by reserving the old UIDs for other accounts.
+It checks that the new workers can use the stored data and that the accounts
+with reused UIDs cannot read it. It also checks that nginx cannot write to
+the published directory or read cache files and reports.
 
 Each build first writes private staging files. It then makes gzip and Brotli
 sidecars with ``pigz`` and ``brotli``, and checks both by decompression.

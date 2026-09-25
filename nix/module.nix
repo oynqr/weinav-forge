@@ -17,9 +17,10 @@ let
   instances = lib.filterAttrs (_: instance: instance.enable) cfg.instances;
   names = builtins.attrNames instances;
   cacheGroup = "weinav-forge-cache";
+  buildGroup = "weinav-forge-work";
   publicGroup = "weinav-forge-public";
-  fetchUser = "weinav-forge-fetch";
-  buildUser = "weinav-forge-build";
+  fetchUser = "weinav-fetch";
+  buildUser = "weinav-build";
   runtime = "/run/weinav-forge";
   executable = "${cfg.package}/bin/weinav-forge";
   quote = lib.escapeShellArg;
@@ -59,7 +60,7 @@ let
   cacheCleanup = ''
     find ${quote "${cfg.cacheDirectory}/urls"} -maxdepth 1 -type f -name '*.json' \
       -mmin +${toString (cfg.retention.cacheMaxAgeHours * 60)} -delete
-    referenced=$(mktemp ${quote "${runtime}/references.XXXXXX"})
+    referenced=$(mktemp ${quote "${cfg.cacheDirectory}/references.XXXXXX"})
     trap 'rm -f -- "$referenced"' EXIT
     find ${quote cfg.cacheDirectory} -maxdepth 1 -type f -name '*.json' -print0 \
       | xargs -0 -r jq -r '.sources[].sha256' > "$referenced"
@@ -108,13 +109,16 @@ let
       (
         set -e
         destination=${quote destination}
-        stage=$(mktemp -d ${quote "${cfg.stateDirectory}/staging/${name}.XXXXXX"})
+        stage=$(mktemp -u ${quote "${cfg.stateDirectory}/staging/${name}.XXXXXXXXXXXX"})
+        mkdir -m 0770 "$stage"
         publication=""
         pointer=""
         trap 'rm -rf -- "$stage"; if [ -n "$publication" ]; then rm -rf -- "$publication"; fi; if [ -n "$pointer" ]; then rm -f -- "$pointer"; fi' EXIT
         ${executable} process ${lib.escapeShellArgs args} --output "$stage"
-        publication=$(mktemp -d "$destination/.generations/.stage.XXXXXX")
-        install -m 0640 "$stage/ephemeris.zip" "$publication/ephemeris.zip"
+        candidate=$(mktemp -u "$destination/.generations/.stage.XXXXXXXXXXXX")
+        mkdir -m 0770 "$candidate"
+        publication=$candidate
+        cat "$stage/ephemeris.zip" > "$publication/ephemeris.zip"
         ${lib.optionalString cfg.compression.gzip.enable ''
           ${cfg.compression.gzip.package}/bin/pigz -n -${toString cfg.compression.gzip.level} \
             -p ${toString cfg.compression.threads} -c "$publication/ephemeris.zip" > "$publication/ephemeris.zip.gz"
@@ -134,7 +138,7 @@ let
           echo "Refuse ${name}: ZIP timestamp is outside the publication window" >&2
           exit 1
         fi
-        chmod 00750 "$publication"
+        chmod 00770 "$publication"
         chmod 0640 "$publication"/*
         generation="generation-$(date +%s)-''${publication##*.}"
         sync -f "$publication"
@@ -206,7 +210,8 @@ let
   };
   sandbox = {
     Type = "oneshot";
-    UMask = "0027";
+    DynamicUser = true;
+    UMask = "0007";
     NoNewPrivileges = true;
     CapabilityBoundingSet = "";
     AmbientCapabilities = "";
@@ -237,6 +242,7 @@ let
     MemoryMax = cfg.limits.memoryMax;
     CPUQuota = cfg.limits.cpuQuota;
     Nice = 10;
+    NoExecPaths = paths ++ [ runtime ];
   };
   paths = [
     cfg.cacheDirectory
@@ -522,28 +528,26 @@ in
     users = {
       groups = {
         ${cacheGroup} = { };
+        ${buildGroup} = { };
         ${publicGroup} = { };
       };
       users = {
-        ${fetchUser} = {
-          isSystemUser = true;
-          group = cacheGroup;
-        };
-        ${buildUser} = {
-          isSystemUser = true;
-          group = cacheGroup;
-          extraGroups = [ publicGroup ];
-        };
         ${config.services.nginx.user}.extraGroups = lib.mkIf cfg.nginx.enable [ publicGroup ];
       };
     };
     systemd = {
       tmpfiles.rules = [
-        "d ${cfg.cacheDirectory} 2750 ${fetchUser} ${cacheGroup} -"
-        "d ${cfg.stateDirectory} 0700 ${buildUser} ${cacheGroup} -"
-        "d ${cfg.outputDirectory} 2750 ${buildUser} ${publicGroup} -"
-        "d ${runtime} 0770 ${fetchUser} ${cacheGroup} -"
-        "f ${runtime}/lock 0660 ${fetchUser} ${cacheGroup} -"
+        "d ${cfg.cacheDirectory} 2770 root ${cacheGroup} -"
+        "Z ${cfg.cacheDirectory} ~2770 root ${cacheGroup} -"
+        "A+ ${cfg.cacheDirectory} - - - - d:u::rwx,d:g::rwx,d:o::---"
+        "d ${cfg.stateDirectory} 2770 root ${buildGroup} -"
+        "Z ${cfg.stateDirectory} ~2770 root ${buildGroup} -"
+        "A+ ${cfg.stateDirectory} - - - - d:u::rwx,d:g::rwx,d:o::---"
+        "d ${cfg.outputDirectory} 2770 root ${buildGroup} -"
+        "Z ${cfg.outputDirectory} ~2770 root ${buildGroup} -"
+        "A+ ${cfg.outputDirectory} - - - - g::rwx,g:${publicGroup}:r-x,d:u::rwx,d:g::rwx,d:g:${publicGroup}:r-x,d:o::---"
+        "d ${runtime} 0750 root ${cacheGroup} -"
+        "f ${runtime}/lock 0660 root ${cacheGroup} -"
       ];
       timers.weinav-forge-fetch = {
         description = "Update GNSS source data";
@@ -587,8 +591,8 @@ in
           after = [ "systemd-tmpfiles-setup.service" ];
           serviceConfig = sandbox // {
             User = buildUser;
-            Group = cacheGroup;
-            SupplementaryGroups = [ publicGroup ];
+            Group = buildGroup;
+            SupplementaryGroups = [ cacheGroup ];
             ExecStart = lib.getExe buildScript;
             TimeoutStartSec = cfg.build.timeout;
             PrivateNetwork = true;

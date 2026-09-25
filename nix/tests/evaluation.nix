@@ -99,6 +99,16 @@ assert enabled.services.nginx.virtualHosts."example.test".locations."/other".ret
 assert
   enabled.systemd.services.weinav-forge-fetch.unitConfig.OnSuccess == "weinav-forge-build.service";
 assert enabled.systemd.services.weinav-forge-build.serviceConfig.PrivateNetwork;
+assert enabled.systemd.services.weinav-forge-fetch.serviceConfig.DynamicUser;
+assert enabled.systemd.services.weinav-forge-build.serviceConfig.DynamicUser;
+assert !(enabled.users.users ? weinav-fetch);
+assert !(enabled.users.users ? weinav-build);
+assert !(enabled.users.users ? weinav-forge-fetch);
+assert !(enabled.users.users ? weinav-forge-build);
+assert
+  enabled.systemd.services.weinav-forge-fetch.serviceConfig.User
+  != enabled.systemd.services.weinav-forge-build.serviceConfig.User;
+assert enabled.systemd.timers.weinav-forge-fetch.timerConfig.RandomizedDelaySec == "30s";
 assert enabled.systemd.services.weinav-forge-build.serviceConfig.IPAddressDeny == "any";
 assert
   custom.systemd.services.weinav-forge-build.serviceConfig.BindReadOnlyPaths == [ "/srv/gnss-cache" ];

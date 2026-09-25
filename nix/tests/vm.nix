@@ -26,8 +26,12 @@ let
       done
       if [ "$command" = fetch ]; then
         mkdir -p ${cache}/objects ${cache}/urls
-        curl -fsS --max-time 10 http://127.0.0.1:8081/source > ${cache}/source
-        chmod 0640 ${cache}/source
+        curl -fsS --max-time 10 http://127.0.0.1:8081/source > ${cache}/source.new
+        chmod 0640 ${cache}/source.new
+        mv -f ${cache}/source.new ${cache}/source
+        id -u > ${cache}/fetch-uid
+        if chmod 0777 ${cache} 2>/dev/null; then exit 95; fi
+        if rm /run/weinav-forge/lock 2>/dev/null; then exit 96; fi
         if touch ${public}/fetch-must-not-write 2>/dev/null; then exit 90; fi
         if touch /etc/fetch-must-not-write 2>/dev/null; then exit 91; fi
         exit 0
@@ -35,6 +39,13 @@ let
       if curl -fsS --max-time 1 http://127.0.0.1:8081/source >/dev/null 2>&1; then exit 92; fi
       if touch ${cache}/build-must-not-write 2>/dev/null; then exit 93; fi
       if touch /etc/build-must-not-write 2>/dev/null; then exit 94; fi
+      id -u > ${state}/build-uid
+      if chmod 0777 ${state} 2>/dev/null; then exit 97; fi
+      if chmod 0777 ${public} 2>/dev/null; then exit 98; fi
+      if [ -f ${cache}/pause-process ]; then
+        touch ${state}/paused
+        sleep 120
+      fi
       if [ -f ${cache}/fail-process ]; then
         printf '{"status":"refused"}\n' > "$report"
         exit 4
@@ -126,6 +137,7 @@ pkgs.testers.runNixOSTest {
       "f /srv/fixture/source 0644 root root - first-generation"
     ];
     environment.systemPackages = with pkgs; [
+      acl
       curl
       pigz
       brotli
@@ -169,6 +181,26 @@ pkgs.testers.runNixOSTest {
     first_digest = digest()
     machine.fail("runuser -u nginx -- cat ${cache}/source")
     machine.fail("runuser -u nginx -- cat ${state}/reports/watch.json")
+    machine.fail("runuser -u nginx -- touch ${public}/nginx-must-not-write")
+    machine.fail("runuser -u nginx -- touch ${public}/watch/current/nginx-must-not-write")
+    machine.fail("runuser -u nginx -- sh -c 'echo broken > ${public}/watch/current/ephemeris.zip'")
+    for service in ["fetch", "build"]:
+        assert machine.succeed(f"systemctl show -p DynamicUser --value weinav-forge-{service}").strip() == "yes"
+        machine.fail(f"grep '^weinav-{service}:' /etc/passwd")
+        machine.fail(f"getent passwd weinav-{service}")
+    machine.succeed("touch ${cache}/pause-process; systemctl start --no-block weinav-forge-build")
+    machine.wait_until_succeeds("test -e ${state}/paused")
+    machine.succeed("systemctl kill --signal=KILL weinav-forge-build")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = failed")
+    machine.succeed("rm ${cache}/pause-process ${state}/paused; systemctl reset-failed weinav-forge-build")
+    fetch_uid = int(machine.succeed("cat ${cache}/fetch-uid"))
+    build_uid = int(machine.succeed("cat ${state}/build-uid"))
+    assert fetch_uid != build_uid
+    for role, uid in [("fetch", fetch_uid), ("build", build_uid)]:
+        assert 61184 <= uid <= 65519
+        machine.succeed(f"useradd --uid {uid} --no-create-home --no-user-group recycled-{role}")
+        for path in ["${cache}/source", "${state}/reports/watch.json", "${public}/watch/current/ephemeris.zip", "/run/weinav-forge/lock"]:
+            machine.fail(f"runuser -u recycled-{role} -- cat {path}")
     machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://localhost/agnss/watch/current/ephemeris.zip) = 404")
     machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://localhost/agnss/watch/.generations/) = 404")
     machine.succeed("systemd-analyze security --no-pager weinav-forge-fetch.service weinav-forge-build.service > /tmp/security.txt")
@@ -195,6 +227,10 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test ! -e ${public}/watch/.generations/.stage.interrupted")
     check_encodings()
 
+    assert int(machine.succeed("cat ${cache}/fetch-uid")) != fetch_uid
+    assert int(machine.succeed("cat ${state}/build-uid")) != build_uid
+    machine.succeed("test -z \"$(ls -A ${state}/staging)\"")
+
     machine.succeed("systemd-run --unit=weinav-reader ${pkgs.python3}/bin/python ${reader}")
     machine.succeed("systemd-run --unit=hold-lock -p RuntimeMaxSec=30s ${pkgs.util-linux}/bin/flock /run/weinav-forge/lock ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/touch /tmp/lock-held; while [ ! -e /tmp/release-lock ]; do ${pkgs.coreutils}/bin/sleep 0.1; done'")
     machine.wait_until_succeeds("test -e /tmp/lock-held")
@@ -208,6 +244,28 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("test $(unzip -p ${public}/watch/current/ephemeris.zip payload) = third-generation")
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
     machine.wait_until_succeeds("test -e /tmp/reader-done", timeout=30)
+    check_encodings()
+
+    before = current()
+    before_digest = digest()
+    machine.succeed("useradd --system --gid weinav-forge-cache weinav-forge-fetch")
+    machine.succeed("useradd --system --gid weinav-forge-cache weinav-forge-build")
+    for path, owner, group, mode in [
+        ("${cache}", "weinav-forge-fetch", "weinav-forge-cache", "2750"),
+        ("${state}", "weinav-forge-build", "weinav-forge-cache", "0700"),
+        ("${public}", "weinav-forge-build", "weinav-forge-public", "2750"),
+    ]:
+        machine.succeed(f"setfacl -Rb {path}; chown -R {owner}:{group} {path}; find {path} -type d -exec chmod {mode} {{}} +")
+    machine.succeed("systemd-tmpfiles --create --prefix=${cache} --prefix=${state} --prefix=${public}")
+    for path in ["${cache}", "${state}", "${public}"]:
+        assert machine.succeed(f"stat -c %u {path}").strip() == "0"
+    assert current() == before and digest() == before_digest
+    check_encodings()
+    machine.succeed("systemctl start weinav-forge-fetch")
+    machine.wait_until_succeeds(f"test $(readlink ${public}/watch/current) != {before}")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
+    assert int(machine.succeed("cat ${cache}/fetch-uid")) >= 61184
+    assert int(machine.succeed("cat ${state}/build-uid")) >= 61184
     check_encodings()
 
     machine.succeed("systemctl stop fixture-source")
