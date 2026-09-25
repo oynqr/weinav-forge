@@ -33,57 +33,126 @@ pub fn angle(value: f64) -> f64 {
     (value + PI).rem_euclid(TAU) - PI
 }
 
-pub fn position(p: &Parameters, dt: f64, toe: f64, system: System, geo: bool) -> Result<[f64; 3]> {
-    ensure!(
-        p.iter().all(|x| x.is_finite()) && p[0] > 0.0 && p[1].abs() < 1.0,
-        "invalid Kepler elements"
-    );
-    let [
-        sqa,
-        ecc,
-        i0,
-        omega0,
-        omega,
-        m0,
-        dn,
-        omd,
-        idot,
-        cuc,
-        cus,
-        cic,
-        cis,
-        crc,
-        crs,
-    ] = *p;
-    let a = sqa * sqa;
-    let n = gravity(system).sqrt() / sqa.powi(3) + dn;
-    let mean = angle(m0 + n * dt);
-    let mut eccentric = mean;
-    for _ in 0..20 {
-        let delta = (eccentric - ecc * eccentric.sin() - mean) / (1.0 - ecc * eccentric.cos());
-        eccentric -= delta;
-        if delta.abs() < 1e-14 {
-            break;
+struct Orbit {
+    parameters: Parameters,
+    semi_major: f64,
+    unperturbed_motion: f64,
+    eccentricity_scale: f64,
+    earth_rate: f64,
+}
+
+struct Geometry {
+    dt: f64,
+    sin_e: f64,
+    cos_e: f64,
+    denominator: f64,
+    s2: f64,
+    c2: f64,
+    sin_u: f64,
+    cos_u: f64,
+    sin_i: f64,
+    cos_i: f64,
+    sin_node: f64,
+    cos_node: f64,
+    xp: f64,
+    yp: f64,
+    position: [f64; 3],
+}
+
+impl Orbit {
+    fn new(parameters: Parameters, system: System) -> Result<Self> {
+        ensure!(
+            parameters.iter().all(|x| x.is_finite())
+                && parameters[0] > 0.0
+                && parameters[1].abs() < 1.0,
+            "invalid Kepler elements"
+        );
+        Ok(Self {
+            semi_major: parameters[0] * parameters[0],
+            unperturbed_motion: gravity(system).sqrt() / parameters[0].powi(3),
+            eccentricity_scale: (1.0 - parameters[1] * parameters[1]).sqrt(),
+            earth_rate: earth_rate(system),
+            parameters,
+        })
+    }
+
+    #[inline(always)]
+    fn geometry(&self, dt: f64, toe: f64, geo: bool) -> Geometry {
+        let [
+            _,
+            ecc,
+            i0,
+            omega0,
+            omega,
+            m0,
+            dn,
+            omd,
+            idot,
+            cuc,
+            cus,
+            cic,
+            cis,
+            crc,
+            crs,
+        ] = self.parameters;
+        let n = self.unperturbed_motion + dn;
+        let mean = angle(m0 + n * dt);
+        let mut eccentric = mean;
+        for _ in 0..20 {
+            let (sin_e, cos_e) = eccentric.sin_cos();
+            let delta = (eccentric - ecc * sin_e - mean) / (1.0 - ecc * cos_e);
+            eccentric -= delta;
+            if delta.abs() < 1e-14 {
+                break;
+            }
+        }
+        let (sin_e, cos_e) = eccentric.sin_cos();
+        let denominator = 1.0 - ecc * cos_e;
+        let anomaly = (self.eccentricity_scale * sin_e).atan2(cos_e - ecc);
+        let phi = anomaly + omega;
+        let (s2, c2) = (2.0 * phi).sin_cos();
+        let argument = phi + cuc * c2 + cus * s2;
+        let radius = self.semi_major * denominator + crc * c2 + crs * s2;
+        let inclination = i0 + idot * dt + cic * c2 + cis * s2;
+        let node =
+            omega0 + (omd - if geo { 0.0 } else { self.earth_rate }) * dt - self.earth_rate * toe;
+        let (sin_u, cos_u) = argument.sin_cos();
+        let (sin_i, cos_i) = inclination.sin_cos();
+        let (sin_node, cos_node) = node.sin_cos();
+        let xp = radius * cos_u;
+        let yp = radius * sin_u;
+        Geometry {
+            dt,
+            sin_e,
+            cos_e,
+            denominator,
+            s2,
+            c2,
+            sin_u,
+            cos_u,
+            sin_i,
+            cos_i,
+            sin_node,
+            cos_node,
+            xp,
+            yp,
+            position: [
+                xp * cos_node - yp * cos_i * sin_node,
+                xp * sin_node + yp * cos_i * cos_node,
+                yp * sin_i,
+            ],
         }
     }
-    let v = ((1.0 - ecc * ecc).sqrt() * eccentric.sin()).atan2(eccentric.cos() - ecc);
-    let phi = v + omega;
-    let (s2, c2) = (2.0 * phi).sin_cos();
-    let u = phi + cuc * c2 + cus * s2;
-    let r = a * (1.0 - ecc * eccentric.cos()) + crc * c2 + crs * s2;
-    let inc = i0 + idot * dt + cic * c2 + cis * s2;
-    let rate = earth_rate(system);
-    let node = omega0 + (omd - if geo { 0.0 } else { rate }) * dt - rate * toe;
-    let xp = r * u.cos();
-    let yp = r * u.sin();
-    let x = xp * node.cos() - yp * inc.cos() * node.sin();
-    let y = xp * node.sin() + yp * inc.cos() * node.cos();
-    let z = yp * inc.sin();
+}
+
+pub fn position(p: &Parameters, dt: f64, toe: f64, system: System, geo: bool) -> Result<[f64; 3]> {
+    let orbit = Orbit::new(*p, system)?;
+    let [x, y, z] = orbit.geometry(dt, toe, geo).position;
     if geo {
         let (s, c) = (-5_f64.to_radians()).sin_cos();
         let y1 = y * c + z * s;
         let z1 = -y * s + z * c;
-        let (s, c) = (rate * dt).sin_cos();
+        let (s, c) = (orbit.earth_rate * dt).sin_cos();
         Ok([x * c + y1 * s, -x * s + y1 * c, z1])
     } else {
         Ok([x, y, z])
@@ -163,76 +232,50 @@ fn from_regular(u: Parameters) -> Parameters {
 }
 
 fn jacobian(
-    samples: &[(f64, [f64; 3])],
-    toe: f64,
-    system: System,
+    samples: &[Geometry],
+    orbit: &Orbit,
     u: Parameters,
     indices: &[usize],
     level: Level,
 ) -> DMatrix<f64> {
-    dispatch!(level, simd => jacobian_simd(simd, samples, toe, system, u, indices))
+    dispatch!(level, simd => jacobian_simd(simd, samples, orbit, u, indices))
 }
 
 #[inline(always)]
 fn jacobian_simd<S: Simd>(
     simd: S,
-    samples: &[(f64, [f64; 3])],
-    toe: f64,
-    system: System,
+    samples: &[Geometry],
+    orbit: &Orbit,
     u: Parameters,
     indices: &[usize],
 ) -> DMatrix<f64> {
-    let [
-        sqa,
-        ecc,
-        i0,
-        omega0,
-        omega,
-        m0,
-        dn,
-        omd,
-        idot,
-        cuc,
-        cus,
-        cic,
-        cis,
-        crc,
-        crs,
-    ] = from_regular(u);
-    let a = sqa * sqa;
-    let unperturbed_motion = gravity(system).sqrt() / sqa.powi(3);
-    let n = unperturbed_motion + dn;
-    let eccentricity_scale = (1.0 - ecc * ecc).sqrt();
-    let rate = earth_rate(system);
+    let [sqa, ecc, _, _, _, _, _, _, _, cuc, cus, cic, cis, crc, crs] = orbit.parameters;
+    let a = orbit.semi_major;
+    let unperturbed_motion = orbit.unperturbed_motion;
+    let eccentricity_scale = orbit.eccentricity_scale;
     const PADDED_PARAMETERS: usize = PARAMETER_NAMES.len().next_power_of_two();
     let mut j = DMatrix::zeros(samples.len() * 3, indices.len());
-    for (sample_index, &(dt, _)) in samples.iter().enumerate() {
-        let mean = angle(m0 + n * dt);
-        let mut eccentric = mean;
-        for _ in 0..20 {
-            let (sin_e, cos_e) = eccentric.sin_cos();
-            let delta = (eccentric - ecc * sin_e - mean) / (1.0 - ecc * cos_e);
-            eccentric -= delta;
-            if delta.abs() < 1e-14 {
-                break;
-            }
-        }
-        let (sin_e, cos_e) = eccentric.sin_cos();
-        let denominator = 1.0 - ecc * cos_e;
-        let anomaly = (eccentricity_scale * sin_e).atan2(cos_e - ecc);
-        let phi = anomaly + omega;
-        let (s2, c2) = (2.0 * phi).sin_cos();
-        let argument = phi + cuc * c2 + cus * s2;
-        let radius = a * denominator + crc * c2 + crs * s2;
-        let inclination = i0 + idot * dt + cic * c2 + cis * s2;
-        let node = omega0 + (omd - rate) * dt - rate * toe;
-        let (sin_u, cos_u) = argument.sin_cos();
-        let (sin_i, cos_i) = inclination.sin_cos();
-        let (sin_node, cos_node) = node.sin_cos();
-        let xp = radius * cos_u;
-        let yp = radius * sin_u;
-        let x = xp * cos_node - yp * cos_i * sin_node;
-        let y = xp * sin_node + yp * cos_i * cos_node;
+    for (
+        sample_index,
+        &Geometry {
+            dt,
+            sin_e,
+            cos_e,
+            denominator,
+            s2,
+            c2,
+            sin_u,
+            cos_u,
+            sin_i,
+            cos_i,
+            sin_node,
+            cos_node,
+            xp,
+            yp,
+            position: [x, y, _],
+        },
+    ) in samples.iter().enumerate()
+    {
         let mut derivatives = [[0.0; PADDED_PARAMETERS]; 3];
         for offset in (0..PADDED_PARAMETERS).step_by(S::f64s::LEN) {
             let d_mean = S::f64s::from_fn(simd, |lane| match offset + lane {
@@ -325,21 +368,28 @@ pub fn fit(
     let steps: [f64; 15] = [
         1e-5, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1e-13, 1e-13, 1e-13, 1e-9, 1e-9, 1e-9, 1e-9, 1e-4, 1e-4,
     ];
-    let residual = |u: Parameters| -> Result<DVector<f64>> {
+    let residual = |u: Parameters| -> Result<(DVector<f64>, Orbit, Vec<Geometry>)> {
         let p = from_regular(u);
         ensure!(p[1] < 0.5, "eccentricity exceeds fit bound");
-        let mut values = Vec::with_capacity(samples.len() * 3);
-        for &(dt, xyz) in samples {
-            let model = position(&p, dt, toe, system, false)?;
-            values.extend((0..3).map(|i| xyz[i] - model[i]));
-        }
-        Ok(DVector::from_vec(values))
+        let orbit = Orbit::new(p, system)?;
+        let geometry: Vec<_> = samples
+            .iter()
+            .map(|&(dt, _)| orbit.geometry(dt, toe, false))
+            .collect();
+        let values = DVector::from_iterator(
+            samples.len() * 3,
+            samples
+                .iter()
+                .zip(&geometry)
+                .flat_map(|((_, xyz), model)| (0..3).map(|i| xyz[i] - model.position[i])),
+        );
+        Ok((values, orbit, geometry))
     };
     let mut u = to_regular(start);
     if let Some(dn) = pinned_dn {
         u[6] = dn;
     }
-    let mut r = residual(u)?;
+    let (mut r, mut orbit, mut geometry) = residual(u)?;
     let mut score = r.norm_squared();
     let mut damping = 1e-3;
     let mut iterations = 0;
@@ -348,7 +398,7 @@ pub fn fit(
         iterations = iteration + 1;
         let minimum_analytic_eccentricity = 1e-6;
         let mut j = if u[1].hypot(u[4]) >= minimum_analytic_eccentricity {
-            jacobian(samples, toe, system, u, &indices, simd_level)
+            jacobian(&geometry, &orbit, u, &indices, simd_level)
         } else {
             let mut j = DMatrix::zeros(r.len(), indices.len());
             for (column, &index) in indices.iter().enumerate() {
@@ -357,7 +407,7 @@ pub fn fit(
                 a[index] += h;
                 let mut b = u;
                 b[index] -= h;
-                let derivative = (residual(a)? - residual(b)?) / (2.0 * h);
+                let derivative = (residual(a)?.0 - residual(b)?.0) / (2.0 * h);
                 j.set_column(column, &derivative);
             }
             j
@@ -385,11 +435,13 @@ pub fn fit(
             for (i, &index) in indices.iter().enumerate() {
                 next[index] += delta[i] / norms[i];
             }
-            if let Ok(candidate) = residual(next) {
+            if let Ok((candidate, candidate_orbit, candidate_geometry)) = residual(next) {
                 let next_score = candidate.norm_squared();
                 if next_score < score {
                     u = next;
                     r = candidate;
+                    orbit = candidate_orbit;
+                    geometry = candidate_geometry;
                     score = next_score;
                     damping = (damping * 0.3).max(1e-12);
                     improvement = true;
@@ -527,16 +579,21 @@ mod tests {
                     8e-8, -6e-8, 210.0, -140.0,
                 ];
                 let u = to_regular(p);
-                let analytic = jacobian(&samples, toe, system, u, &indices, Level::new());
+                let orbit = Orbit::new(from_regular(u), system)?;
+                let geometry: Vec<_> = samples
+                    .iter()
+                    .map(|&(dt, _)| orbit.geometry(dt, toe, false))
+                    .collect();
+                let analytic = jacobian(&geometry, &orbit, u, &indices, Level::new());
                 let pinned_indices: Vec<_> = (0..15).filter(|&i| i != 6).collect();
                 for level in simd_levels() {
                     assert_eq!(
-                        jacobian(&samples, toe, system, u, &indices, level),
+                        jacobian(&geometry, &orbit, u, &indices, level),
                         analytic,
                         "{level:?}: Jacobian differs"
                     );
                     assert_eq!(
-                        jacobian(&samples, toe, system, u, &pinned_indices, level),
+                        jacobian(&geometry, &orbit, u, &pinned_indices, level),
                         analytic.clone().remove_column(6),
                         "{level:?}: pinned Jacobian differs"
                     );

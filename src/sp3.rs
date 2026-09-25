@@ -25,6 +25,9 @@ impl Sp3 {
         let bytes = decompress(input)?;
         let text = std::str::from_utf8(&bytes)?;
         ensure!(text.is_ascii() && text.starts_with('#'), "invalid SP3 file");
+        for samples in self.satellites.values_mut() {
+            samples.sort_by(|a, b| a.time.total_cmp(&b.time));
+        }
         let mut time = None;
         let mut time_system = "GPS";
         let mut count = 0;
@@ -76,18 +79,18 @@ impl Sp3 {
                     predicted: line.as_bytes().get(79) == Some(&b'P'),
                 };
                 let samples = self.satellites.entry((system, svid)).or_default();
-                if let Some(old) = samples.iter_mut().find(|s| s.time == time) {
-                    *old = sample;
-                } else {
+                if samples.last().is_none_or(|last| last.time < time) {
                     samples.push(sample);
+                } else {
+                    match samples.binary_search_by(|old| old.time.total_cmp(&time)) {
+                        Ok(index) => samples[index] = sample,
+                        Err(index) => samples.insert(index, sample),
+                    }
                 }
                 count += 1;
             }
         }
         ensure!(count > 0, "SP3 has no usable satellite positions");
-        for samples in self.satellites.values_mut() {
-            samples.sort_by(|a, b| a.time.total_cmp(&b.time));
-        }
         Ok(())
     }
 
@@ -147,6 +150,60 @@ impl Sp3 {
             clock,
             drift: cr - cl,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(minute: u8, x: f64, clock: f64, predicted: bool) -> String {
+        format!(
+            "* 2026 09 25 00 {minute:02} 00.0\nPG01{x:14.6}{:14.6}{:14.6}{clock:14.6}{:19}{}\n",
+            20_000.0,
+            30_000.0,
+            "",
+            if predicted { 'P' } else { ' ' }
+        )
+    }
+
+    #[test]
+    fn merges_unordered_and_overlapping_epochs_with_last_sample_winning() -> Result<()> {
+        let mut sp3 = Sp3::default();
+        let mut first = String::from("#cP\n");
+        for minute in (0..=10).step_by(2) {
+            first.push_str(&sample(minute, 10_000.0 + f64::from(minute), 1.0, false));
+        }
+        sp3.add(first.as_bytes())?;
+        let mut second = String::from("#cP\n");
+        for minute in [9, 1, 7, 3, 5] {
+            second.push_str(&sample(minute, 10_000.0 + f64::from(minute), 1.0, false));
+        }
+        second.push_str(&sample(4, 50_000.0, 2.0, false));
+        second.push_str(&sample(4, 60_000.0, 999_999.0, true));
+        sp3.add(second.as_bytes())?;
+        let key = (System::Gps, 1);
+        let samples = &sp3.satellites[&key];
+        assert_eq!(samples.len(), 11);
+        for (minute, entry) in samples.iter().enumerate() {
+            assert_eq!(entry.time - samples[0].time, minute as f64 * 60.0);
+            if minute != 4 {
+                assert_eq!(entry.position[0], (10_000.0 + minute as f64) * 1000.0);
+                assert_eq!(entry.clock, Some(1e-6));
+                assert!(!entry.predicted);
+            }
+        }
+        assert_eq!(samples[4].position[0], 60_000_000.0);
+        assert!(samples[4].clock.is_none());
+        assert!(samples[4].predicted);
+        let time = samples[5].time;
+        assert_eq!(sp3.window(key), Some((samples[4].time, samples[6].time)));
+        assert!(sp3.state(key, time).is_err());
+        sp3.add(format!("#cP\n{}", sample(4, 10_004.0, 1.0, false)).as_bytes())?;
+        let state = sp3.state(key, time)?;
+        assert_eq!(state.position[0], 10_005_000.0);
+        assert!((state.velocity[0] - 1000.0 / 60.0).abs() < 1e-7);
+        Ok(())
     }
 }
 
