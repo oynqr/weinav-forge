@@ -154,7 +154,22 @@ A single atomic link replacement publishes the set.
 
 Nginx selects the identity, gzip or Brotli file from one immutable generation
 for each request. Each response has a no-store cache policy. Source files,
-reports, and generation directories have no public URL.
+reports, and directory listings have no public URL.
+
+After the instance builds, the service creates ``manifest.json`` from the
+published files. It records their SHA-256 checksums, byte sizes and original
+timestamps. Each entry uses a URL for a specific generation. Thus its
+checksum remains valid when a later build updates the instance's latest URL.
+Only the ZIP file has a public generation URL; its build metadata stays
+private. Metadata stored with each ZIP describes the actual build, including
+when a later build with different settings fails.
+
+The manifest and its sidecars have their own atomic publication link in
+``.manifest``. Links in the output root provide access to these files.
+A failed manifest update keeps the previous set. Cleanup keeps all archive
+generations named in the current manifest, as well as each instance's
+current generation. Unlisted old generations use the normal retention
+limits. An instance with no published ZIP has no manifest entry.
 
 The module's ``compression.threads`` option sets the pigz thread count; the
 default is 1. Brotli uses one thread. ``compression.gzip.level`` and

@@ -16,10 +16,12 @@ let
       shift
       output=""
       report=""
+      flavor=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --output) output=$2; shift 2 ;;
           --report) report=$2; shift 2 ;;
+          --flavor) flavor=$2; shift 2 ;;
           --no-agnss|--allow-degraded) shift ;;
           *) shift 2 ;;
         esac
@@ -46,7 +48,7 @@ let
         touch ${state}/paused
         sleep 120
       fi
-      if [ -f ${cache}/fail-process ]; then
+      if [ -f ${cache}/fail-process ] || { [ "$flavor" = open-plus ] && [ -f ${cache}/fail-secondary ]; }; then
         printf '{"status":"refused"}\n' > "$report"
         exit 4
       fi
@@ -60,16 +62,22 @@ let
       zip -q -0 ephemeris.zip time payload
     '';
   };
-  pigz = pkgs.writeShellApplication {
-    name = "pigz";
-    text = ''
-      if [ -f ${cache}/fail-compression ]; then exit 1; fi
-      exec ${pkgs.pigz}/bin/pigz "$@"
-    '';
-  };
+  compressor =
+    name: package:
+    pkgs.writeShellApplication {
+      inherit name;
+      text = ''
+        source=''${!#}
+        if [ -f ${cache}/fail-compression ]; then exit 1; fi
+        if [ -f ${cache}/fail-manifest-compression ] && [[ "$source" = */manifest.json ]]; then exit 1; fi
+        exec ${package}/bin/${name} "$@"
+      '';
+    };
   reader = pkgs.writeText "weinav-reader.py" ''
     import gzip
+    import hashlib
     import io
+    import json
     import subprocess
     import time
     import urllib.request
@@ -89,6 +97,13 @@ let
             assert archive.testzip() is None
             assert archive.read("payload") in [b"second-generation", b"third-generation"]
             assert len(archive.read("time")) == 13
+        with urllib.request.urlopen("http://localhost/agnss/manifest.json") as response:
+            manifest = json.load(response)
+        for variant in manifest["variants"]:
+            with urllib.request.urlopen("http://localhost" + variant["url"]) as response:
+                archive = response.read()
+            assert len(archive) == variant["size"]
+            assert hashlib.sha256(archive).hexdigest() == variant["sha256"]
         time.sleep(0.02)
     open("/tmp/reader-done", "w").close()
   '';
@@ -106,7 +121,16 @@ pkgs.testers.runNixOSTest {
         flavor = "huawei";
         systems = [ "gps" ];
       };
-      compression.gzip.package = pigz;
+      instances.secondary = {
+        flavor = "open-plus";
+        systems = [
+          "gps"
+          "galileo"
+        ];
+        agnss = false;
+      };
+      compression.gzip.package = compressor "pigz" pkgs.pigz;
+      compression.brotli.package = compressor "brotli" pkgs.brotli;
       fetch.timerConfig = {
         OnBootSec = "3s";
         OnUnitActiveSec = "10min";
@@ -146,6 +170,8 @@ pkgs.testers.runNixOSTest {
     ];
   };
   testScript = ''
+    import json
+
     machine.start(allow_reboot=True)
     machine.wait_for_unit("nginx.service")
     machine.wait_for_unit("fixture-source.service")
@@ -163,20 +189,48 @@ pkgs.testers.runNixOSTest {
     def digest():
         return machine.succeed("sha256sum ${public}/watch/current/ephemeris.zip").split()[0]
 
-    def check_encodings():
-        for encoding, command in [("identity", "cat"), ("gzip", "pigz -dc"), ("br", "brotli -dc")]:
-            machine.succeed(f"curl -fsS -D /tmp/headers -H 'Accept-Encoding: {encoding}' http://localhost/agnss/watch/ephemeris.zip -o /tmp/encoded")
-            headers = machine.succeed("cat /tmp/headers").lower()
-            assert "content-type: application/zip" in headers
-            assert "cache-control: no-store" in headers
-            assert "vary: accept-encoding" in headers
-            if encoding == "identity":
-                assert "content-encoding:" not in headers
+    def check_manifest(expected=("secondary", "watch")):
+        manifest = json.loads(machine.succeed("curl -fsS http://localhost/agnss/manifest.json"))
+        assert manifest["version"] == 1
+        assert [variant["name"] for variant in manifest["variants"]] == list(expected)
+        for variant in manifest["variants"]:
+            machine.succeed(f"curl -fsS http://localhost{variant['url']} -o /tmp/variant.zip")
+            assert machine.succeed("sha256sum /tmp/variant.zip").split()[0] == variant["sha256"]
+            assert int(machine.succeed("stat -c %s /tmp/variant.zip")) == variant["size"]
+            assert int(machine.succeed("unzip -p /tmp/variant.zip time")) == variant["timestamp_ms"]
+            assert variant["latest_url"] == f"/agnss/{variant['name']}/ephemeris.zip"
+            assert variant["generation"] in variant["url"]
+            if variant["name"] == "watch":
+                assert variant["flavor"] == "huawei" and variant["systems"] == ["gps"] and variant["agnss"]
             else:
-                assert f"content-encoding: {encoding}" in headers
-            machine.succeed(f"{command} /tmp/encoded > /tmp/decoded; cmp /tmp/decoded ${public}/watch/current/ephemeris.zip")
+                assert variant["flavor"] == "open-plus" and variant["systems"] == ["gps", "galileo"] and not variant["agnss"]
+        return manifest
+
+    def check_encodings():
+        for url, path, mime in [
+            ("/agnss/watch/ephemeris.zip", "${public}/watch/current/ephemeris.zip", "application/zip"),
+            ("/agnss/manifest.json", "${public}/manifest.json", "application/json"),
+        ]:
+            for encoding, suffix, command in [("identity", "", "cat"), ("gzip", ".gz", "pigz -dc"), ("br", ".br", "brotli -dc")]:
+                machine.succeed(f"curl -fsS -D /tmp/headers -H 'Accept-Encoding: {encoding}' http://localhost{url} -o /tmp/encoded")
+                headers = machine.succeed("cat /tmp/headers").lower()
+                assert f"content-type: {mime}" in headers
+                assert "cache-control: no-store" in headers
+                assert "vary: accept-encoding" in headers
+                if encoding != "identity":
+                    machine.succeed(f"test -f {path}{suffix}")
+                    assert f"content-encoding: {encoding}" in headers
+                else:
+                    assert "content-encoding:" not in headers
+                machine.succeed(f"{command} /tmp/encoded > /tmp/decoded; cmp /tmp/decoded {path}")
+        check_manifest()
 
     check_encodings()
+    first_manifest = check_manifest()
+    machine.succeed("test -f ${public}/manifest.json.gz; test -f ${public}/manifest.json.br")
+    machine.fail("runuser -u nginx -- sh -c 'echo broken > ${public}/manifest.json'")
+    for path in ["/agnss/.manifest/current/manifest.json", "/agnss/watch/current/variant.json", "/agnss/manifest.json.gz"]:
+        assert machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost{path}").strip() == "404"
     first = current()
     first_digest = digest()
     machine.fail("runuser -u nginx -- cat ${cache}/source")
@@ -211,12 +265,15 @@ pkgs.testers.runNixOSTest {
     machine.succeed("touch ${cache}/fail-process")
     machine.fail("systemctl start weinav-forge-build")
     assert current() == first and digest() == first_digest
+    assert check_manifest() == first_manifest
     machine.succeed("rm ${cache}/fail-process; touch ${cache}/fail-compression")
     machine.fail("systemctl start weinav-forge-build")
     assert current() == first and digest() == first_digest
+    assert check_manifest() == first_manifest
     machine.succeed("rm ${cache}/fail-compression; touch ${cache}/old-time")
     machine.fail("systemctl start weinav-forge-build")
     assert current() == first and digest() == first_digest
+    assert check_manifest() == first_manifest
     machine.succeed("rm ${cache}/old-time")
     machine.succeed("mkdir ${public}/watch/.generations/.stage.interrupted")
     machine.succeed("printf second-generation > /srv/fixture/source")
@@ -266,6 +323,32 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
     assert int(machine.succeed("cat ${cache}/fetch-uid")) >= 61184
     assert int(machine.succeed("cat ${state}/build-uid")) >= 61184
+    check_encodings()
+
+    previous_manifest = check_manifest()
+    secondary = previous_manifest["variants"][0]
+    machine.succeed("touch ${cache}/fail-secondary")
+    machine.fail("systemctl start weinav-forge-build")
+    partial_manifest = check_manifest()
+    assert partial_manifest["variants"][0] == secondary
+    assert partial_manifest["variants"][1]["generation"] != previous_manifest["variants"][1]["generation"]
+    machine.succeed("rm ${public}/secondary/current")
+    machine.fail("systemctl start weinav-forge-build")
+    check_manifest(expected=("watch",))
+    machine.succeed("rm ${cache}/fail-secondary; systemctl reset-failed weinav-forge-build; systemctl start weinav-forge-build")
+    check_encodings()
+
+    previous_manifest = check_manifest()
+    machine.succeed("touch ${cache}/fail-manifest-compression")
+    for variant in previous_manifest["variants"]:
+        machine.succeed(f"touch -d '3 days ago' ${public}/{variant['name']}/.generations/{variant['generation']}")
+    for attempt in range(4):
+        machine.succeed("systemctl reset-failed weinav-forge-build")
+        machine.fail("systemctl start weinav-forge-build")
+        assert check_manifest() == previous_manifest
+    assert current().split("/")[-1] != previous_manifest["variants"][1]["generation"]
+    machine.succeed("rm ${cache}/fail-manifest-compression; systemctl reset-failed weinav-forge-build; systemctl start weinav-forge-build")
+    assert check_manifest() != previous_manifest
     check_encodings()
 
     machine.succeed("systemctl stop fixture-source")

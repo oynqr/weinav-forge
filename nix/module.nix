@@ -91,6 +91,20 @@ let
       ${cacheCleanup}
     '';
   };
+  compressFile = file: ''
+    ${lib.optionalString cfg.compression.gzip.enable ''
+      ${cfg.compression.gzip.package}/bin/pigz -n -${toString cfg.compression.gzip.level} \
+        -p ${toString cfg.compression.threads} -c "${file}" > "${file}.gz"
+      ${cfg.compression.gzip.package}/bin/pigz -d -c "${file}.gz" > "$stage/gzip-roundtrip"
+      cmp "${file}" "$stage/gzip-roundtrip"
+    ''}
+    ${lib.optionalString cfg.compression.brotli.enable ''
+      ${cfg.compression.brotli.package}/bin/brotli -q ${toString cfg.compression.brotli.quality} \
+        -c "${file}" > "${file}.br"
+      ${cfg.compression.brotli.package}/bin/brotli -d -c "${file}.br" > "$stage/brotli-roundtrip"
+      cmp "${file}" "$stage/brotli-roundtrip"
+    ''}
+  '';
   buildOne =
     name: instance:
     let
@@ -119,18 +133,10 @@ let
         mkdir -m 0770 "$candidate"
         publication=$candidate
         cat "$stage/ephemeris.zip" > "$publication/ephemeris.zip"
-        ${lib.optionalString cfg.compression.gzip.enable ''
-          ${cfg.compression.gzip.package}/bin/pigz -n -${toString cfg.compression.gzip.level} \
-            -p ${toString cfg.compression.threads} -c "$publication/ephemeris.zip" > "$publication/ephemeris.zip.gz"
-          ${cfg.compression.gzip.package}/bin/pigz -d -c "$publication/ephemeris.zip.gz" > "$stage/gzip-roundtrip"
-          cmp "$publication/ephemeris.zip" "$stage/gzip-roundtrip"
-        ''}
-        ${lib.optionalString cfg.compression.brotli.enable ''
-          ${cfg.compression.brotli.package}/bin/brotli -q ${toString cfg.compression.brotli.quality} \
-            -c "$publication/ephemeris.zip" > "$publication/ephemeris.zip.br"
-          ${cfg.compression.brotli.package}/bin/brotli -d -c "$publication/ephemeris.zip.br" > "$stage/brotli-roundtrip"
-          cmp "$publication/ephemeris.zip" "$stage/brotli-roundtrip"
-        ''}
+        ${compressFile "$publication/ephemeris.zip"}
+        printf '%s\n' ${
+          quote (builtins.toJSON { inherit (instance) flavor systems agnss; })
+        } > "$publication/variant.json"
         stamp=$(unzip -p "$publication/ephemeris.zip" time)
         [[ "$stamp" =~ ^[0-9]{13}$ ]]
         age=$(( $(date +%s%3N) - stamp ))
@@ -157,6 +163,62 @@ let
         echo "Update failed for ${name}; keep its last published generation" >&2
       fi
     '';
+  buildManifest = ''
+    (
+      set -e
+      destination=${quote "${cfg.outputDirectory}/.manifest"}
+      stage=$(mktemp -u ${quote "${cfg.stateDirectory}/staging/manifest.XXXXXXXXXXXX"})
+      mkdir -m 0770 "$stage"
+      publication=""
+      pointer=""
+      trap 'rm -rf -- "$stage"; if [ -n "$publication" ]; then rm -rf -- "$publication"; fi; if [ -n "$pointer" ]; then rm -f -- "$pointer"; fi' EXIT
+      : > "$stage/variants.jsonl"
+      ${lib.concatMapStringsSep "\n" (name: ''
+        archive_root=$(readlink -f ${quote "${cfg.outputDirectory}/${name}/current"} || true)
+        if [ -f "$archive_root/ephemeris.zip" ]; then
+          generation=''${archive_root##*/}
+          [[ "$generation" =~ ^generation-[0-9]+-[A-Za-z0-9]+$ ]]
+          profile='{}'
+          if [ -f "$archive_root/variant.json" ]; then
+            profile=$(cat "$archive_root/variant.json")
+          fi
+          digest=$(sha256sum "$archive_root/ephemeris.zip")
+          digest=''${digest%% *}
+          stamp=$(unzip -p "$archive_root/ephemeris.zip" time)
+          jq -cn --arg name ${quote name} --arg generation "$generation" \
+            --arg url "${cfg.nginx.location}${name}/generations/$generation/ephemeris.zip" \
+            --arg latest_url ${quote "${cfg.nginx.location}${name}/ephemeris.zip"} \
+            --arg sha256 "$digest" --argjson size "$(stat -c %s "$archive_root/ephemeris.zip")" \
+            --argjson timestamp_ms "$stamp" --argjson profile "$profile" \
+            '$profile + {name:$name,generation:$generation,url:$url,latest_url:$latest_url,sha256:$sha256,size:$size,timestamp_ms:$timestamp_ms}' \
+            >> "$stage/variants.jsonl"
+        fi
+      '') names}
+      jq -s '{version:1,variants:.}' "$stage/variants.jsonl" > "$stage/manifest.json"
+      candidate=$(mktemp -u "$destination/.generations/.stage.XXXXXXXXXXXX")
+      mkdir -m 0770 "$candidate"
+      publication=$candidate
+      cat "$stage/manifest.json" > "$publication/manifest.json"
+      ${compressFile "$publication/manifest.json"}
+      chmod 00770 "$publication"
+      chmod 0640 "$publication"/*
+      generation="generation-$(date +%s)-''${publication##*.}"
+      sync -f "$publication"
+      mv -T "$publication" "$destination/.generations/$generation"
+      publication=""
+      pointer="$destination/.current-''${generation}"
+      ln -s ".generations/$generation" "$pointer"
+      mv -Tf "$pointer" "$destination/current"
+      pointer=""
+      sync -f "$destination"
+      echo "Published discovery manifest: $generation"
+    ) &
+    worker=$!
+    if ! wait "$worker"; then
+      failed=1
+      echo "Manifest update failed; keep the last published manifest" >&2
+    fi
+  '';
   generationCleanup =
     name:
     let
@@ -169,6 +231,12 @@ let
       while IFS= read -r generation; do
         kept=$((kept + 1))
         if [ "$kept" -le ${toString cfg.retention.generations} ] || [ ".generations/$generation" = "$current" ]; then
+          continue
+        fi
+        if [ -f ${quote "${cfg.outputDirectory}/manifest.json"} ] && \
+          jq -e --arg name ${quote name} --arg generation "$generation" \
+            'any(.variants[]; .name == $name and .generation == $generation)' \
+            ${quote "${cfg.outputDirectory}/manifest.json"} >/dev/null; then
           continue
         fi
         if [ -n "$(find "$destination/.generations/$generation" -maxdepth 0 \
@@ -189,6 +257,7 @@ let
       coreutils
       diffutils
       findutils
+      jq
       unzip
       util-linux
     ];
@@ -201,10 +270,11 @@ let
         mkdir -p ${quote "${cfg.outputDirectory}/${name}/.generations"}
         find ${quote "${cfg.outputDirectory}/${name}/.generations"} -mindepth 1 -maxdepth 1 -type d -name '.stage.*' -exec rm -rf -- {} +
         find ${quote "${cfg.outputDirectory}/${name}"} -maxdepth 1 -type l -name '.current-*' -delete
-      '') names}
+      '') (names ++ [ ".manifest" ])}
       failed=0
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList buildOne instances)}
-      ${lib.concatMapStringsSep "\n" generationCleanup names}
+      ${buildManifest}
+      ${lib.concatMapStringsSep "\n" generationCleanup (names ++ [ ".manifest" ])}
       exit "$failed"
     '';
   };
@@ -261,39 +331,59 @@ let
         ".."
       ])
     ) (lib.tail (lib.splitString "/" path));
+  serveConfig = mime: ''
+    default_type ${mime};
+    types { }
+    gzip off;
+    brotli off;
+    gzip_static ${if cfg.compression.gzip.enable then "on" else "off"};
+    brotli_static ${if cfg.compression.brotli.enable then "on" else "off"};
+    gzip_vary on;
+    add_header Vary Accept-Encoding always;
+    add_header Cache-Control "no-store" always;
+    open_file_cache off;
+    autoindex off;
+    limit_except GET { deny all; }
+  '';
+  currentLocations =
+    key: uri: directory: file: mime:
+    let
+      suffix = builtins.substring 0 12 (builtins.hashString "sha256" key);
+      variable = "weinav_${suffix}";
+      internal = "/_weinav_internal_${suffix}";
+    in
+    [
+      {
+        name = "= ${cfg.nginx.location}${uri}";
+        value.extraConfig = ''
+          root ${cfg.outputDirectory}/${directory}/current;
+          set ${"$"}${variable} $realpath_root;
+          rewrite ^ ${internal} last;
+        '';
+      }
+      {
+        name = "= ${internal}";
+        value.extraConfig = ''
+          internal;
+          alias ${"$"}${variable}/${file};
+          ${serveConfig mime}
+        '';
+      }
+    ];
   locations = lib.listToAttrs (
-    lib.concatMap (
+    currentLocations "manifest" "manifest.json" ".manifest" "manifest.json" "application/json"
+    ++ lib.concatMap (
       name:
       let
-        variable = "weinav_${builtins.substring 0 12 (builtins.hashString "sha256" name)}";
-        internal = "/_weinav_internal_${builtins.substring 0 12 (builtins.hashString "sha256" name)}";
+        capture = "weinav_generation_${builtins.substring 0 12 (builtins.hashString "sha256" name)}";
       in
-      [
+      currentLocations "variant:${name}" "${name}/ephemeris.zip" name "ephemeris.zip" "application/zip"
+      ++ [
         {
-          name = "= ${cfg.nginx.location}${name}/ephemeris.zip";
+          name = "~ ^${cfg.nginx.location}${name}/generations/(?<${capture}>generation-[0-9]+-[A-Za-z0-9]+)/ephemeris[.]zip$";
           value.extraConfig = ''
-            root ${cfg.outputDirectory}/${name}/current;
-            set ${"$"}${variable} $realpath_root;
-            rewrite ^ ${internal} last;
-          '';
-        }
-        {
-          name = "= ${internal}";
-          value.extraConfig = ''
-            internal;
-            alias ${"$"}${variable}/ephemeris.zip;
-            default_type application/zip;
-            types { }
-            gzip off;
-            brotli off;
-            gzip_static ${if cfg.compression.gzip.enable then "on" else "off"};
-            brotli_static ${if cfg.compression.brotli.enable then "on" else "off"};
-            gzip_vary on;
-            add_header Vary Accept-Encoding always;
-            add_header Cache-Control "no-store" always;
-            open_file_cache off;
-            autoindex off;
-            limit_except GET { deny all; }
+            alias ${cfg.outputDirectory}/${name}/.generations/${"$"}${capture}/ephemeris.zip;
+            ${serveConfig "application/zip"}
           '';
         }
       ]
@@ -546,6 +636,9 @@ in
         "d ${cfg.outputDirectory} 2770 root ${buildGroup} -"
         "Z ${cfg.outputDirectory} ~2770 root ${buildGroup} -"
         "A+ ${cfg.outputDirectory} - - - - g::rwx,g:${publicGroup}:r-x,d:u::rwx,d:g::rwx,d:g:${publicGroup}:r-x,d:o::---"
+        "L ${cfg.outputDirectory}/manifest.json - - - - .manifest/current/manifest.json"
+        "L ${cfg.outputDirectory}/manifest.json.gz - - - - .manifest/current/manifest.json.gz"
+        "L ${cfg.outputDirectory}/manifest.json.br - - - - .manifest/current/manifest.json.br"
         "d ${runtime} 0750 root ${cacheGroup} -"
         "f ${runtime}/lock 0660 root ${cacheGroup} -"
       ];

@@ -96,6 +96,14 @@ assert !valid noInstances;
 assert !wrongType.success;
 assert enabled.services.weinav-forge.package == pkgs.hello;
 assert enabled.services.nginx.virtualHosts."example.test".locations."/other".return == "204";
+assert enabled.services.nginx.virtualHosts."example.test".locations ? "= /agnss/manifest.json";
+assert lib.hasInfix "application/json" (
+  lib.concatStringsSep "\n" (
+    map (location: location.extraConfig) (
+      builtins.attrValues enabled.services.nginx.virtualHosts."example.test".locations
+    )
+  )
+);
 assert
   enabled.systemd.services.weinav-forge-fetch.unitConfig.OnSuccess == "weinav-forge-build.service";
 assert enabled.systemd.services.weinav-forge-build.serviceConfig.PrivateNetwork;

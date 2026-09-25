@@ -138,6 +138,31 @@ Each instance publishes a new ZIP only when its checks pass. Failed updates
 and reboots keep its previous ZIP available, even after expiry. The ZIP keeps
 its original timestamp.
 
+Read ``/agnss/manifest.json`` to find the available variants. If you change
+``nginx.location``, use that prefix instead of ``/agnss/``. The JSON object
+has ``version`` set to 1 and a ``variants`` list. Each entry has these fields:
+
+* ``name``: instance name.
+* ``url``: URL for this file version, on the same server.
+* ``latest_url``: URL that always selects the latest published file.
+* ``generation``: file version identifier.
+* ``sha256``: SHA-256 checksum of the ZIP file, in hexadecimal.
+* ``size``: ZIP file size in bytes.
+* ``timestamp_ms``: original ZIP timestamp, in milliseconds since the Unix
+  epoch.
+* ``flavor``, ``systems`` and ``agnss``: source policy, constellations and
+  AGNSS selection. Older files can lack these three fields until the next
+  successful build.
+
+Use ``url`` to download a file and check its checksum. The file at
+``latest_url`` can change after you read the manifest. Read the manifest
+again if a file version is no longer available. The current manifest keeps
+its listed file versions available.
+
+An instance appears only after it has a published ZIP. A failed update keeps
+the previous entry, including an expired file and its original timestamp.
+If the manifest update fails, the previous manifest stays available.
+
 Common options under ``services.weinav-forge`` are:
 
 * ``package``: executable package override.
