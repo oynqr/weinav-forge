@@ -13,6 +13,9 @@ use weinav_forge::{
     time::Instant,
 };
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     version,

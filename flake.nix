@@ -86,7 +86,7 @@
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
             BINDGEN_EXTRA_CLANG_ARGS = "--target=${target} -isystem ${lib.getDev musl.stdenv.cc.libc}/include";
             CARGO_BUILD_TARGET = target;
-            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C relocation-model=static";
+            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C relocation-model=static -C link-arg=-lgcc";
           }
           // {
             "CARGO_TARGET_${lib.toUpper targetName}_LINKER" = compiler;

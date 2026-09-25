@@ -33,6 +33,7 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "4", default-features = false }
 fearless_simd = "1"
+mimalloc = "0.1"
 
 [profile.release]
 opt-level = 3
