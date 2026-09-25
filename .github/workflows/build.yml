@@ -93,7 +93,7 @@ jobs:
           nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/*.yml
           for document in README.rst DEVELOPING.rst; do
             nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
-              rst2pseudoxml --exit-status=1 "$document" > /dev/null
+              rst2pseudoxml --syntax-highlight=none --exit-status=1 "$document" > /dev/null
           done
       - name: Check that external actions use full commit pins
         run: |
