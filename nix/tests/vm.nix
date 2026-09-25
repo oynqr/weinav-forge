@@ -29,9 +29,11 @@ let
       done
       if [ "$command" = fetch ]; then
         mkdir -p ${cache}/objects ${cache}/urls
-        curl -fsS --max-time 10 http://127.0.0.1:8081/source > ${cache}/source.new
-        chmod 0640 ${cache}/source.new
-        mv -f ${cache}/source.new ${cache}/source
+        download=$(mktemp ${cache}/source.XXXXXXXX)
+        trap 'rm -f -- "$download"' EXIT
+        curl -fsS --max-time 10 http://127.0.0.1:8081/source > "$download"
+        chmod 0640 "$download"
+        mv -f "$download" ${cache}/source
         id -u > ${cache}/fetch-uid
         if chmod 0777 ${cache} 2>/dev/null; then exit 95; fi
         if rm /run/weinav-forge/lock 2>/dev/null; then exit 96; fi
@@ -47,7 +49,7 @@ let
       if chmod 0777 ${public} 2>/dev/null; then exit 98; fi
       if [ -f ${cache}/pause-process ]; then
         touch ${state}/paused
-        sleep 120
+        while [ -f ${cache}/pause-process ]; do sleep 0.1; done
       fi
       printf 'process\n' >> ${state}/process-invocations
       test -n "$variants"
@@ -106,8 +108,10 @@ let
     import time
     import urllib.request
     import zipfile
+    from pathlib import Path
 
-    for index in range(150):
+    index = 0
+    while not Path("/tmp/reader-stop").exists():
         encoding = ["identity", "gzip", "br"][index % 3]
         request = urllib.request.Request("http://localhost/agnss/watch/ephemeris.zip", headers={"Accept-Encoding": encoding})
         with urllib.request.urlopen(request) as response:
@@ -119,7 +123,8 @@ let
             data = subprocess.run(["${pkgs.brotli}/bin/brotli", "-dc"], input=data, capture_output=True, check=True).stdout
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             assert archive.testzip() is None
-            assert archive.read("payload") in [b"second-generation", b"third-generation"]
+            payload = archive.read("payload")
+            assert payload in [b"second-generation", b"third-generation"]
             assert len(archive.read("time")) == 13
         with urllib.request.urlopen("http://localhost/agnss/manifest.json") as response:
             manifest = json.load(response)
@@ -128,8 +133,11 @@ let
                 archive = response.read()
             assert len(archive) == variant["size"]
             assert hashlib.sha256(archive).hexdigest() == variant["sha256"]
+        Path("/tmp/reader-ready").touch()
+        if payload == b"third-generation":
+            Path("/tmp/reader-updated").touch()
+        index += 1
         time.sleep(0.02)
-    open("/tmp/reader-done", "w").close()
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -164,7 +172,7 @@ pkgs.testers.runNixOSTest {
 
       fetch.timerConfig = {
         OnBootSec = "3s";
-        OnUnitActiveSec = "10min";
+        AccuracySec = "1s";
       };
 
       nginx.enable = true;
@@ -175,8 +183,16 @@ pkgs.testers.runNixOSTest {
       wantedBy = [ "multi-user.target" ];
       before = [ "weinav-forge-fetch.service" ];
 
+      postStart = ''
+        ${pkgs.curl}/bin/curl --fail --silent --show-error \
+          --retry 120 --retry-connrefused --retry-delay 1 --retry-max-time 120 \
+          --connect-timeout 1 --max-time 2 --output /dev/null \
+          http://127.0.0.1:8081/source
+      '';
+
       serviceConfig = {
         ExecStart = "${pkgs.python3}/bin/python -m http.server 8081 --bind 127.0.0.1 --directory /srv/fixture";
+        TimeoutStartSec = "3min";
         DynamicUser = true;
         NoNewPrivileges = true;
         ProtectSystem = "strict";
@@ -208,17 +224,18 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    from datetime import timedelta
 
-    boot_timeout = 900
+    boot_timeout = timedelta(minutes=15)
 
     machine.start(allow_reboot=True)
     machine.wait_for_console_text("connecting to host\\.\\.\\.", timeout=boot_timeout)
     machine.wait_for_unit("nginx.service")
     machine.wait_for_unit("fixture-source.service")
     try:
-        machine.wait_until_succeeds("test -L ${public}/watch/current", timeout=120)
+        machine.wait_until_succeeds("test -L ${public}/watch/current", timeout=timedelta(minutes=2))
     except Exception:
-        print(machine.succeed("journalctl -b -u weinav-forge-fetch -u weinav-forge-build --no-pager"))
+        print(machine.succeed("journalctl -b -u fixture-source -u weinav-forge-fetch -u weinav-forge-build --no-pager"))
         raise
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
     machine.succeed("systemctl stop weinav-forge-fetch.timer")
@@ -331,8 +348,9 @@ pkgs.testers.runNixOSTest {
     assert int(machine.succeed("cat ${state}/build-uid")) != build_uid
     machine.succeed("test -z \"$(ls -A ${state}/staging)\"")
 
-    machine.succeed("systemd-run --unit=weinav-reader ${pkgs.python3}/bin/python ${reader}")
-    machine.succeed("systemd-run --unit=hold-lock -p RuntimeMaxSec=30s ${pkgs.util-linux}/bin/flock /run/weinav-forge/lock ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/touch /tmp/lock-held; while [ ! -e /tmp/release-lock ]; do ${pkgs.coreutils}/bin/sleep 0.1; done'")
+    machine.succeed("systemd-run --no-block --unit=weinav-reader -p Type=oneshot -p RemainAfterExit=yes ${pkgs.python3}/bin/python ${reader}")
+    machine.wait_until_succeeds("test -e /tmp/reader-ready")
+    machine.succeed("systemd-run --unit=hold-lock ${pkgs.util-linux}/bin/flock /run/weinav-forge/lock ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/touch /tmp/lock-held; while [ ! -e /tmp/release-lock ]; do ${pkgs.coreutils}/bin/sleep 0.1; done'")
     machine.wait_until_succeeds("test -e /tmp/lock-held")
     before = current()
     machine.succeed("printf third-generation > /srv/fixture/source")
@@ -341,9 +359,15 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-fetch) = activating")
     assert current() == before
     machine.succeed("touch /tmp/release-lock")
-    machine.wait_until_succeeds("test $(unzip -p ${public}/watch/current/ephemeris.zip payload) = third-generation")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-fetch) = inactive")
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
-    machine.wait_until_succeeds("test -e /tmp/reader-done", timeout=30)
+    machine.succeed("systemctl start weinav-forge-build")
+    machine.succeed("test $(unzip -p ${public}/watch/current/ephemeris.zip payload) = third-generation")
+    machine.wait_until_succeeds("test -e /tmp/reader-updated")
+    machine.succeed("touch /tmp/reader-stop")
+    machine.wait_for_unit("weinav-reader.service")
+    machine.succeed("test $(systemctl show -p Result --value weinav-reader) = success")
+    machine.succeed("systemctl stop weinav-reader")
     check_encodings()
 
     before = current()
@@ -414,6 +438,7 @@ pkgs.testers.runNixOSTest {
     before = current()
     machine.fail("systemctl start weinav-forge-fetch")
     assert current() == before
+    machine.succeed("test -z \"$(find ${cache} -maxdepth 1 -name 'source.*' -print)\"")
     machine.succeed("systemctl start weinav-forge-build")
     check_encodings()
 
@@ -427,6 +452,10 @@ pkgs.testers.runNixOSTest {
     machine.reboot()
     machine.wait_for_console_text("connecting to host\\.\\.\\.", timeout=boot_timeout)
     machine.wait_for_unit("nginx.service")
+    machine.wait_until_succeeds("test $(systemctl show -p ExecMainStartTimestampMonotonic --value weinav-forge-fetch) -gt 0 && systemctl show -p ActiveState --value weinav-forge-fetch | grep -Eq '^(inactive|failed)$'")
+    machine.succeed("test $(systemctl show -p Result --value weinav-forge-fetch) = success")
+    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = failed")
+    machine.succeed("systemctl stop weinav-forge-fetch.timer")
     assert digest() == expired_digest
     assert machine.succeed("unzip -p ${public}/watch/current/ephemeris.zip time") == expired_time
     check_encodings()
