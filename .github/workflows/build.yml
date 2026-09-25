@@ -1,0 +1,100 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        default: ""
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: ${{ matrix.system }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+      - name: Record the lock file hashes
+        run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Use the Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Check the flake
+        run: nix flake check --no-update-lock-file --print-build-logs
+      - name: Build the tool
+        run: nix build --no-update-lock-file --print-build-logs
+      - name: Collect the binary
+        run: install -D result/bin/weinav-forge binary/weinav-forge
+      - name: Show the binary
+        run: file binary/weinav-forge
+      - name: Test that the binary has no dynamic section
+        run: |
+          readelf -l binary/weinav-forge
+          ! readelf -l binary/weinav-forge | grep -q INTERP
+      - name: Test that the binary starts
+        run: ./binary/weinav-forge --version
+      - name: Check that the lock files did not change
+        run: sha256sum --check "$RUNNER_TEMP/lock-files.sha256"
+      - name: Upload the binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: weinav-forge-${{ matrix.system }}
+          path: binary/weinav-forge
+          if-no-files-found: error
+
+  lint:
+    name: format and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+      - name: Record the lock file hashes
+        run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Use the Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Check the format
+        run: |
+          nix shell --inputs-from . nixpkgs#nixfmt-rfc-style -c nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
+          nix shell --inputs-from . nixpkgs#taplo -c taplo fmt --check Cargo.toml .cargo/config.toml
+          nix shell --inputs-from . nixpkgs#prettier -c prettier --check .github/workflows/*.yml
+      - name: Lint the files
+        run: |
+          nix shell --inputs-from . nixpkgs#statix -c statix check
+          nix shell --inputs-from . nixpkgs#deadnix -c deadnix --fail flake.nix nix/module.nix nix/tests/*.nix
+          nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/*.yml
+          for document in README.rst DEVELOPING.rst; do
+            nix shell --inputs-from . nixpkgs#python3Packages.docutils -c \
+              rst2pseudoxml --exit-status=1 "$document" > /dev/null
+          done
+      - name: Check that the lock files did not change
+        run: sha256sum --check "$RUNNER_TEMP/lock-files.sha256"
