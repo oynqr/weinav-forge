@@ -248,12 +248,18 @@ runs in the merge workflow.
 
 This setup uses the built-in ``GITHUB_TOKEN``. No personal access token or
 extra repository secret is required. The token needs permission to update
-the default branch by fast-forward. Require the build and lint checks in
-the branch rules.
+the default branch by fast-forward and to comment on pull requests.
+Require the build and lint checks in the branch rules.
 
-If a merge fails, read the workflow log. If the base branch changed, ask
-Dependabot to rebase with ``@dependabot rebase`` on the pull request. If a
-package is too new, rerun the failed merge job after the age limit. A failed
+If the base branch advances or the checked branch needs a rebase, the
+workflow posts ``@dependabot rebase`` and leaves the pull request open.
+It sends at most one request for each head and base revision pair.
+Dependabot must update the branch and the new build must pass before a
+merge can occur. If Dependabot does not respond to the automatic comment,
+post the command yourself.
+
+If a merge fails for another reason, read the workflow log. If a package is
+too new, rerun the failed merge job after the age limit. A failed
 publication lookup leaves the pull request open.
 
 To update the lock files locally, run::

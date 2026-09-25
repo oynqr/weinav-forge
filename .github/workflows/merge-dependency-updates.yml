@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      pull-requests: read
+      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -36,27 +36,64 @@ jobs:
           [[ "$BASE_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CHECKED_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PULL_REQUEST" =~ ^[0-9]+$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST" > "$RUNNER_TEMP/dependency-update-pr.json"
-          if ! jq -e '.user.login == "dependabot[bot]" and .user.type == "Bot"' \
-            "$RUNNER_TEMP/dependency-update-pr.json" > /dev/null; then
-            exit 0
-          fi
-          mergeability_attempts=12
-          mergeability_delay=5
-          for ((attempt = 0; attempt < mergeability_attempts; attempt++)); do
+          read_pull_request() {
             gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST" > "$RUNNER_TEMP/dependency-update-pr.json"
-            if jq -e '.mergeable_state == "clean"' "$RUNNER_TEMP/dependency-update-pr.json" > /dev/null; then
-              break
+            if ! jq -e --arg revision "$CHECKED_REVISION" \
+              --arg branch "$DEFAULT_BRANCH" --arg repository "$GITHUB_REPOSITORY" '
+                .user.login == "dependabot[bot]" and .user.type == "Bot"
+                  and .state == "open" and .draft == false and .merged == false
+                  and .head.sha == $revision and .base.ref == $branch
+                  and .head.repo.full_name == $repository and .base.repo.full_name == $repository
+              ' "$RUNNER_TEMP/dependency-update-pr.json" > /dev/null; then
+              echo "The pull request no longer matches the checked Dependabot revision. No action taken."
+              exit 0
             fi
-            sleep "$mergeability_delay"
-          done
-          jq -e --arg revision "$CHECKED_REVISION" --arg base "$BASE_REVISION" \
-            --arg branch "$DEFAULT_BRANCH" --arg repository "$GITHUB_REPOSITORY" \
-            '.user.login == "dependabot[bot]" and .user.type == "Bot"
-              and .state == "open" and .draft == false and .merged == false
-              and .head.sha == $revision and .base.sha == $base and .base.ref == $branch
-              and .head.repo.full_name == $repository and .base.repo.full_name == $repository
-              and .mergeable_state == "clean"' "$RUNNER_TEMP/dependency-update-pr.json"
+          }
+          request_rebase() {
+            local current="$1"
+            local comparison body
+            [[ "$current" =~ ^[0-9a-f]{40}$ ]]
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REVISION...$current" --jq .status)
+            if [ "$comparison" != ahead ] && [ "$comparison" != identical ]; then
+              echo "::error::The default branch was rewritten. No rebase requested."
+              exit 1
+            fi
+            body=$(printf '@dependabot rebase\n\nRebase request for head %s onto base %s.' \
+              "$CHECKED_REVISION" "$current")
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" \
+              > "$RUNNER_TEMP/dependency-update-comments.json"
+            if jq -e --arg body "$body" 'add | any(.[];
+              .user.login == "github-actions[bot]" and .user.type == "Bot" and .body == $body)' \
+              "$RUNNER_TEMP/dependency-update-comments.json" > /dev/null; then
+              echo "A rebase was already requested for these head and base revisions."
+              exit 0
+            fi
+            read_pull_request
+            printf '%s' "$body" > "$RUNNER_TEMP/dependency-update-rebase.txt"
+            gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+              --body-file "$RUNNER_TEMP/dependency-update-rebase.txt"
+            echo "Requested a Dependabot rebase. A new successful build is required before merging."
+            exit 0
+          }
+          check_merge_base() {
+            local current comparison
+            read_pull_request
+            current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$CHECKED_REVISION" --jq .status)
+            case "$comparison" in
+              ahead) ;;
+              diverged) request_rebase "$current" ;;
+              behind|identical)
+                echo "The checked revision is already included in the default branch."
+                exit 0
+                ;;
+              *) echo "::error::Unexpected branch comparison: $comparison"; exit 1 ;;
+            esac
+            if [ "$current" != "$BASE_REVISION" ]; then
+              request_rebase "$current"
+            fi
+          }
+          read_pull_request
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/files" \
             > "$RUNNER_TEMP/dependency-update-files.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST/commits" \
@@ -143,17 +180,20 @@ jobs:
           PY
             fi
           fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)
-          if [ "$current" != "$BASE_REVISION" ]; then
-            echo "::error::The default branch changed during the checks. The pull request stays open."
+          mergeability_attempts=12
+          mergeability_delay=5
+          for ((attempt = 0; attempt < mergeability_attempts; attempt++)); do
+            check_merge_base
+            if jq -e '.mergeable_state != "unknown"' "$RUNNER_TEMP/dependency-update-pr.json" > /dev/null; then
+              break
+            fi
+            sleep "$mergeability_delay"
+          done
+          jq -e --arg base "$BASE_REVISION" '.base.sha == $base and .mergeable_state == "clean"' \
+            "$RUNNER_TEMP/dependency-update-pr.json"
+          if ! gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
+            -f sha="$CHECKED_REVISION" -F force=false; then
+            check_merge_base
+            echo "::error::The fast-forward failed without a stale base. No rebase requested."
             exit 1
           fi
-          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REVISION...$CHECKED_REVISION" --jq .status)
-          test "$comparison" = ahead
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST" \
-            | jq -e --arg revision "$CHECKED_REVISION" --arg base "$BASE_REVISION" '
-                .state == "open" and .draft == false and .merged == false
-                  and .head.sha == $revision and .base.sha == $base
-                  and .mergeable_state == "clean"'
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
-            -f sha="$CHECKED_REVISION" -F force=false
