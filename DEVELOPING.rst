@@ -17,6 +17,10 @@ build the static executable. The CI workflow checks ``x86_64-linux`` and
 ``aarch64-linux`` on separate runners. A local flake check builds the checks
 for the host system.
 
+Cargo and Nix use the release profile in ``Cargo.toml``. The standard-library
+``optimize_for_size`` feature does not override this profile. Keep ``-lgcc``
+in the Nix link flags: mimalloc's C code needs GCC integer runtime helpers.
+
 Normal Rust tests use synthetic data and local servers. They do not need
 access to source providers.
 
@@ -83,64 +87,11 @@ The host must permit access to Linux performance events. A single CPU also
 limits the memory needed for the recording. Keep the profile and its symbol
 file together. Time the release executable without the profiler attached.
 
-The first profile on 2026-09-25 used all five constellations. About 87 percent
-of CPU samples were in trigonometry, orbit position and fit residuals.
-The work was ranked in this order:
-
-1. Replace numerical fit derivatives with analytic derivatives. Numerical
-   derivatives needed two orbit evaluations per free parameter and sample.
-2. Measure release optimization level 3 against level ``z``.
-3. Reduce matrix allocation and source parsing. These costs were much smaller
-   in the first profile, so these changes were deferred.
-
-The fitter now evaluates an analytic Jacobian once per sample. It converts
-the derivatives to the same regular eccentricity coordinates as the fit.
-Below an eccentricity of ``1e-6``, it keeps central differences to avoid
-division by a small eccentricity. Tests compare each analytic column with
-central differences for all four Kepler constellations. Other tests cover
-circular orbits and the fixed QZSS mean-motion parameter.
-
-The orbit model, iteration limits, fit limits and output checks did not
-change. Different derivatives can change fitted parameters and encoded
-bytes. Compare decoded results and gate reports, not only ZIP checksums.
-Archive UUIDs also change between runs. Use the report's payload checksums
-to compare file bytes without those UUIDs.
-
-The comparison used commit ``a1f2651`` as the baseline, hyperfine 1.20.0,
-samply 0.13.1 and Rust 1.100.0-nightly (2026-08-21). A KVM guest on an AMD
-Ryzen 9 7950X3D used CPU 0. Each timing had one warm-up and five measured
-runs. The fixed time was ``2026-09-25T11:40:00Z``. The cache manifest had this
-SHA-256 checksum::
-
-  6b41436dfb850190f40baa1845d32050b6402f45d625a2e5a7a76bc82d4e19b4
-
-For ``huawei-plus`` with GPS, Galileo and QZSS, without AGNSS, native release
-times were as follows. Each value is the mean and standard deviation.
-
-============================ ==================
-Build                        Time in seconds
-============================ ==================
-Baseline                     10.045 +/- 0.035
-Analytic Jacobian, level z    2.239 +/- 0.007
-Analytic Jacobian, level 3    1.683 +/- 0.011
-============================ ==================
-
-All three builds passed the output checks and kept the same 2,141 records.
-The two analytic builds had identical payload checksums. Optimization level
-3 increased the native executable from 3,778,760 to 4,919,608 bytes.
-
-For the same passing workload, the static Nix executable changed from
-10.612 +/- 0.013 seconds to 2.303 +/- 0.015 seconds, or 4.61 times faster.
-Its size changed from 3,431,384 to 4,647,896 bytes. Both versions kept the
-same 2,141 records. The largest RMS error after encoding changed from
-0.095 metre to 0.084 metre, below the unchanged 1.5 metre limit.
-
-The full five-constellation workload kept the same 6,936 records, excluded
-satellites and gate results. Both versions refused that source snapshot
-because GLONASS and BDS had too few satellites. This refusal workload was
-kept separate from the passing ZIP build. Its static build time changed
-from 15.993 +/- 0.107 seconds to 3.321 +/- 0.005 seconds, or 4.82 times
-faster. The timing command required exit code 4 on each run.
+Compare payload checksums in the reports: archive UUIDs change between runs.
+For changes to orbit fitting, also compare satellite counts, RMS errors and
+gate results. Test nearly circular orbits, fixed QZSS mean motion and each
+available SIMD level. Keep acceptance limits unchanged during optimization.
+Measure peak resident memory when you change the allocator.
 
 NixOS tests
 -----------
@@ -192,22 +143,14 @@ client in Huawei Health 16.1.6.320, described in the supplied ``CLIENT.md``.
 Some header bindings are inferred. Android TLS details and the active
 HMS Core version are unknown, so the profile is an approximation.
 
-Huawei configuration, download and AGNSS hosts receive the application
-headers and a fresh random request ID. Other hosts receive the weinav-forge
-User-Agent. Each redirect selects the profile for its destination. Time
-limits are 8 seconds for a connection and 30 seconds for a complete download,
-including redirects.
-
-TLS offers the five permitted TLS 1.2 cipher suites and the three selected
-TLS 1.3 cipher suites. ALPN offers HTTP/2 before HTTP/1.1. Session tickets
-and session reuse are enabled. HTTP/2 uses 16 MiB stream and connection
-windows, one initial setting, stream ID 3, and the recorded pseudo-header
-order. It sends no priority frames.
+Keep the profile in ``src/http.rs`` specific to Huawei hosts. Each redirect
+must select the profile for its destination and each request must have a
+fresh request ID. Keep certificate checks enabled.
 
 Local server tests check the actual TLS ClientHello, HTTP/2 frames, and
 HTTP/1 header case and order. Other tests check fresh request IDs, header
-selection after redirects, and separate HTTP and AGNSS gzip layers.
-Keep certificate checks enabled. The client uses WebPKI roots.
+selection after redirects, and separate HTTP and AGNSS gzip layers. Run
+these tests with ``nix develop -c cargo test http::tests``.
 
 Source cache and processing
 ---------------------------
@@ -221,6 +164,8 @@ The processor checks the data format, satellite counts, time coverage and
 source policy before packing. ANTEX corrections use the satellite's radial
 phase-centre offset; transverse antenna offsets are not modelled. The
 quantised orbit check permits 0.5 metre beyond the configured fit limit.
+Nearly circular orbits use numerical derivatives because the analytic
+coordinate conversion divides by eccentricity.
 
 Service publication
 -------------------
@@ -230,98 +175,54 @@ The build service has no network access and reads the cache through a
 read-only mount. The services use separate dynamic users. A shared lock
 prevents fetching, building and cleanup from running at the same time.
 
-Systemd assigns the ``weinav-fetch`` and ``weinav-build`` users for each run.
-These names differ from the old static user names, so an old account cannot
-prevent dynamic user allocation after an upgrade. Fixed groups control
-access to stored files. The fetch service uses ``weinav-forge-cache``. The
-build service uses ``weinav-forge-work`` and can read the cache. Nginx uses
-``weinav-forge-public`` to read published files, but cannot write them.
-
-Tmpfiles manages these shared directories, including custom paths. Their
-top directories belong to root and have no access for other users. The
-services cannot change those permissions. Thus a later user with a reused
-UID cannot access files left by an earlier run. Set-group-ID directories
-and default access control lists keep group access on new files. Tmpfiles
-also updates ownership and permissions on existing data during an upgrade.
-The filesystem must support POSIX access control lists.
-
-The shared directory lifetime is independent of either service. The module
-therefore uses tmpfiles instead of private ``StateDirectory`` and
-``CacheDirectory`` directories, which also limit access from other services.
-The root-owned lock file remains in place between runs. Neither worker can
-replace it. The services cannot execute files from the data directories.
-
-The VM test forces new UIDs by reserving the old UIDs for other accounts.
-It checks that the new workers can use the stored data and that the accounts
-with reused UIDs cannot read it. It also checks that nginx cannot write to
-the published directory or read cache files and reports.
+Tmpfiles manages shared storage independently of the dynamic users. Fixed
+groups and default access control lists give each service the required
+access. Keep the top directories and lock file owned by root. Workers must
+not be able to replace the lock or change top-directory permissions. These
+restrictions prevent access by a later account with a reused UID. Nginx must
+not be able to write published files or read private cache files and reports.
+The VM test checks these restrictions after forced UID changes.
 
 Each build first writes private staging files. It then makes gzip and Brotli
 sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
 It keeps a sidecar only if its size is less than the original file size.
-An equal or larger sidecar is deleted. Each run also removes such sidecars
-from earlier publications. Nginx uses the original file when a requested
-sidecar is absent. Both ZIP files and the discovery manifest use this rule.
+This rule applies to ZIP files and the discovery manifest, including
+sidecars from earlier publications.
 The completed set moves to a generation directory on the output filesystem.
 A single atomic link replacement publishes the set.
 
-Nginx selects the identity, gzip or Brotli file from one immutable generation
-for each request. Each response has a no-store cache policy. Source files,
-reports, and directory listings have no public URL.
+Build ``manifest.json`` from published metadata, not the current instance
+settings: an instance can still serve an older build after an update fails.
+Keep original timestamps and use URLs for specific generations so checksums
+remain valid across updates. Publish the manifest and its sidecars through
+their own atomic link. Keep source data, reports and build metadata private.
 
-After the instance builds, the service creates ``manifest.json`` from the
-published files. It records their SHA-256 checksums, byte sizes and original
-timestamps. Each entry uses a URL for a specific generation. Thus its
-checksum remains valid when a later build updates the instance's latest URL.
-Only the ZIP file has a public generation URL; its build metadata stays
-private. Metadata stored with each ZIP describes the actual build, including
-when a later build with different settings fails.
-
-The manifest and its sidecars have their own atomic publication link in
-``.manifest``. Links in the output root provide access to these files.
-A failed manifest update keeps the previous set. Cleanup keeps all archive
-generations named in the current manifest, as well as each instance's
-current generation. Unlisted old generations use the normal retention
-limits. An instance with no published ZIP has no manifest entry.
-
-The module's ``compression.threads`` option sets the pigz thread count; the
-default is 1. Brotli uses one thread. ``compression.gzip.level`` and
-``compression.brotli.quality`` both default to 6. Each format also has an
-``enable`` and a ``package`` option.
-
-Failed updates and reboots keep the previous published generation,
-including output whose timestamp has expired. Cleanup always keeps the
-current generation. Cache cleanup removes old URL metadata and old objects
-that no committed manifest or current URL metadata references.
+Cleanup must keep each current generation and every generation named in the
+current manifest. Failed updates and reboots must keep the previous output,
+even after its timestamp expires. Cache cleanup must keep objects referenced
+by a committed source manifest or current URL metadata.
 
 Lock file updates
 -----------------
 
-The GitHub Actions workflow ``update lock files`` runs each Monday at
-03:27 UTC. You can also start it manually on the default branch. It updates
-``flake.lock`` and ``Cargo.lock``. Cargo uses the minimum publication age in
-``.cargo/config.toml``, currently two days, with the ``deny`` policy.
+The ``update lock files`` workflow runs weekly. You can also start it
+manually on the default branch. Cargo uses the minimum publication age in
+``.cargo/config.toml``: two days, with the ``deny`` policy.
 
 To update the lock files locally, run::
 
   nix flake update
   nix develop --no-update-lock-file -c cargo update -Z min-publish-age
 
-Each automatic update opens a pull request with only the two lock files.
-The workflow runs the shared build, test and lint checks on both supported
-systems. The ``lock-file-update`` status reports their result on the pull
-request. Hash checks verify that the checks did not change the lock files.
-
-After the checks pass, the workflow merges the pull request by fast-forward.
-It keeps the checked commit and its dates. It does not rebase, squash or make
-a merge commit. If a check fails, either branch changes, or a repository rule
-blocks the merge, the pull request stays open.
+Automatic updates open a pull request with only the two lock files. The
+``lock-file-update`` status covers build, test and lint checks on both
+supported systems. The workflow merges the checked commit by fast-forward.
+If checks fail, either branch changes, or repository rules block the merge,
+the pull request stays open.
 
 Permit GitHub Actions to create pull requests in the repository settings.
 The ``GITHUB_TOKEN`` must also be able to update the default branch reference
-by fast-forward. The workflow uses the Git references API with ``force`` set
-to ``false`` for this step. GitHub then marks the pull request as merged.
-No personal access token is required.
+by fast-forward.
 
 Read the failed job's log before you retry an update. A new run creates a
 new update branch and pull request. Previous open pull requests stay open.
