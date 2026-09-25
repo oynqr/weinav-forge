@@ -139,6 +139,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { ... }: {
     imports = [ module ];
     virtualisation.memorySize = 1536;
+    networking.useDHCP = false;
 
     services.weinav-forge = {
       enable = true;
@@ -208,7 +209,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
 
+    boot_timeout = 900
+
     machine.start(allow_reboot=True)
+    machine.wait_for_console_text("connecting to host\\.\\.\\.", timeout=boot_timeout)
     machine.wait_for_unit("nginx.service")
     machine.wait_for_unit("fixture-source.service")
     try:
@@ -421,6 +425,7 @@ pkgs.testers.runNixOSTest {
     assert digest() == expired_digest
     check_encodings()
     machine.reboot()
+    machine.wait_for_console_text("connecting to host\\.\\.\\.", timeout=boot_timeout)
     machine.wait_for_unit("nginx.service")
     assert digest() == expired_digest
     assert machine.succeed("unzip -p ${public}/watch/current/ephemeris.zip time") == expired_time
