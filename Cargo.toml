@@ -5,6 +5,9 @@ edition = "2024"
 description = "Build GNSS assistance data for Huawei watches and Gadgetbridge"
 license = "AGPL-3.0-only"
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"

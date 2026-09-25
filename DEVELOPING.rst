@@ -20,6 +20,9 @@ for the host system.
 Normal Rust tests use synthetic data and local servers. They do not need
 access to source providers.
 
+Cargo forbids unsafe Rust code in all targets of this package, including
+tests. An ``allow`` attribute cannot override this rule.
+
 Captured data tests
 -------------------
 
