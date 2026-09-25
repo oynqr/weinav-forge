@@ -574,9 +574,9 @@ in
           description = "Publish gzip sidecars when they are smaller than the original files.";
         };
         level = mkOption {
-          type = types.ints.between 1 9;
-          default = 6;
-          description = "Pigz compression level.";
+          type = types.either (types.ints.between 1 9) (types.enum [ 11 ]);
+          default = 11;
+          description = "Pigz compression level. Level 11 uses Zopfli.";
         };
         package = mkPackageOption pkgs "pigz" { };
       };
@@ -589,7 +589,7 @@ in
         };
         quality = mkOption {
           type = types.ints.between 0 11;
-          default = 6;
+          default = 11;
           description = "Brotli compression quality.";
         };
         package = mkPackageOption pkgs "brotli" { };
