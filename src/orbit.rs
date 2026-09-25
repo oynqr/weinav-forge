@@ -1,5 +1,6 @@
 use crate::{policy::System, record, seed::State};
 use anyhow::{Context, Result, ensure};
+use fearless_simd::{Level, dispatch, prelude::*};
 use nalgebra::{DMatrix, DVector, Vector3};
 use std::{
     collections::BTreeMap,
@@ -167,6 +168,19 @@ fn jacobian(
     system: System,
     u: Parameters,
     indices: &[usize],
+    level: Level,
+) -> DMatrix<f64> {
+    dispatch!(level, simd => jacobian_simd(simd, samples, toe, system, u, indices))
+}
+
+#[inline(always)]
+fn jacobian_simd<S: Simd>(
+    simd: S,
+    samples: &[(f64, [f64; 3])],
+    toe: f64,
+    system: System,
+    u: Parameters,
+    indices: &[usize],
 ) -> DMatrix<f64> {
     let [
         sqa,
@@ -190,6 +204,7 @@ fn jacobian(
     let n = unperturbed_motion + dn;
     let eccentricity_scale = (1.0 - ecc * ecc).sqrt();
     let rate = earth_rate(system);
+    const PADDED_PARAMETERS: usize = PARAMETER_NAMES.len().next_power_of_two();
     let mut j = DMatrix::zeros(samples.len() * 3, indices.len());
     for (sample_index, &(dt, _)) in samples.iter().enumerate() {
         let mean = angle(m0 + n * dt);
@@ -218,68 +233,72 @@ fn jacobian(
         let yp = radius * sin_u;
         let x = xp * cos_node - yp * cos_i * sin_node;
         let y = xp * sin_node + yp * cos_i * cos_node;
-        let mut derivatives = [[0.0; 3]; 15];
-        for (index, derivative) in derivatives.iter_mut().enumerate() {
-            let d_mean = match index {
+        let mut derivatives = [[0.0; PADDED_PARAMETERS]; 3];
+        for offset in (0..PADDED_PARAMETERS).step_by(S::f64s::LEN) {
+            let d_mean = S::f64s::from_fn(simd, |lane| match offset + lane {
                 0 => -3.0 * unperturbed_motion * dt / sqa,
                 5 => 1.0,
                 6 => dt,
                 _ => 0.0,
-            };
-            let d_ecc = if index == 1 { 1.0 } else { 0.0 };
-            let d_e = (d_mean + sin_e * d_ecc) / denominator;
-            let d_phi = eccentricity_scale / denominator * d_e
-                + sin_e / (eccentricity_scale * denominator) * d_ecc
-                + if index == 4 { 1.0 } else { 0.0 };
-            let d_argument = (1.0 - 2.0 * cuc * s2 + 2.0 * cus * c2) * d_phi
-                + match index {
+            });
+            let d_ecc = S::f64s::from_fn(simd, |lane| if offset + lane == 1 { 1.0 } else { 0.0 });
+            let d_omega = S::f64s::from_fn(simd, |lane| if offset + lane == 4 { 1.0 } else { 0.0 });
+            let d_e = (d_mean + d_ecc * sin_e) / denominator;
+            let d_phi = d_e * (eccentricity_scale / denominator)
+                + d_ecc * (sin_e / (eccentricity_scale * denominator))
+                + d_omega;
+            let d_argument = d_phi * (1.0 - 2.0 * cuc * s2 + 2.0 * cus * c2)
+                + S::f64s::from_fn(simd, |lane| match offset + lane {
                     9 => c2,
                     10 => s2,
                     _ => 0.0,
-                };
-            let d_radius = a * (ecc * sin_e * d_e - cos_e * d_ecc)
-                + 2.0 * (-crc * s2 + crs * c2) * d_phi
-                + match index {
+                });
+            let d_radius = (d_e * (ecc * sin_e) - d_ecc * cos_e) * a
+                + d_phi * (2.0 * (-crc * s2 + crs * c2))
+                + S::f64s::from_fn(simd, |lane| match offset + lane {
                     0 => 2.0 * sqa * denominator,
                     13 => c2,
                     14 => s2,
                     _ => 0.0,
-                };
-            let d_inclination = 2.0 * (-cic * s2 + cis * c2) * d_phi
-                + match index {
+                });
+            let d_inclination = d_phi * (2.0 * (-cic * s2 + cis * c2))
+                + S::f64s::from_fn(simd, |lane| match offset + lane {
                     2 => 1.0,
                     8 => dt,
                     11 => c2,
                     12 => s2,
                     _ => 0.0,
-                };
-            let d_node = match index {
+                });
+            let d_node = S::f64s::from_fn(simd, |lane| match offset + lane {
                 3 => 1.0,
                 7 => dt,
                 _ => 0.0,
-            };
-            let d_xp = d_radius * cos_u - yp * d_argument;
-            let d_yp = d_radius * sin_u + xp * d_argument;
-            *derivative = [
-                d_xp * cos_node - d_yp * cos_i * sin_node + yp * sin_i * sin_node * d_inclination
-                    - y * d_node,
-                d_xp * sin_node + d_yp * cos_i * cos_node - yp * sin_i * cos_node * d_inclination
-                    + x * d_node,
-                d_yp * sin_i + yp * cos_i * d_inclination,
+            });
+            let d_xp = d_radius * cos_u - d_argument * yp;
+            let d_yp = d_radius * sin_u + d_argument * xp;
+            let xyz = [
+                d_xp * cos_node - d_yp * cos_i * sin_node + d_inclination * (yp * sin_i * sin_node)
+                    - d_node * y,
+                d_xp * sin_node + d_yp * cos_i * cos_node - d_inclination * (yp * sin_i * cos_node)
+                    + d_node * x,
+                d_yp * sin_i + d_inclination * (yp * cos_i),
             ];
+            for (axis, value) in xyz.iter().enumerate() {
+                value.store_slice(&mut derivatives[axis][offset..offset + S::f64s::LEN]);
+            }
         }
         for (column, &index) in indices.iter().enumerate() {
             for axis in 0..3 {
                 let derivative = match index {
                     1 => {
-                        derivatives[1][axis] * u[1] / ecc
-                            - (derivatives[4][axis] - derivatives[5][axis]) * u[4] / (ecc * ecc)
+                        derivatives[axis][1] * u[1] / ecc
+                            - (derivatives[axis][4] - derivatives[axis][5]) * u[4] / (ecc * ecc)
                     }
                     4 => {
-                        derivatives[1][axis] * u[4] / ecc
-                            + (derivatives[4][axis] - derivatives[5][axis]) * u[1] / (ecc * ecc)
+                        derivatives[axis][1] * u[4] / ecc
+                            + (derivatives[axis][4] - derivatives[axis][5]) * u[1] / (ecc * ecc)
                     }
-                    _ => derivatives[index][axis],
+                    _ => derivatives[axis][index],
                 };
                 j[(sample_index * 3 + axis, column)] = -derivative;
             }
@@ -324,11 +343,12 @@ pub fn fit(
     let mut score = r.norm_squared();
     let mut damping = 1e-3;
     let mut iterations = 0;
+    let simd_level = Level::new();
     for iteration in 0..80 {
         iterations = iteration + 1;
         let minimum_analytic_eccentricity = 1e-6;
         let mut j = if u[1].hypot(u[4]) >= minimum_analytic_eccentricity {
-            jacobian(samples, toe, system, u, &indices)
+            jacobian(samples, toe, system, u, &indices, simd_level)
         } else {
             let mut j = DMatrix::zeros(r.len(), indices.len());
             for (column, &index) in indices.iter().enumerate() {
@@ -470,6 +490,24 @@ pub fn glonass_acceleration(p: [f64; 3], v: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
+    fn simd_levels() -> Vec<Level> {
+        let detected = Level::new();
+        let mut levels = vec![Level::baseline()];
+        levels.push(detected);
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        levels.extend(
+            [
+                detected.as_sse2().map(Level::Sse2),
+                detected.as_sse4_2().map(Level::Sse4_2),
+                detected.as_avx2().map(Level::Avx2),
+                detected.as_avx512().map(Level::Avx512),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        levels
+    }
+
     #[test]
     fn analytic_jacobian_matches_central_differences() -> Result<()> {
         let indices: Vec<_> = (0..15).collect();
@@ -489,7 +527,20 @@ mod tests {
                     8e-8, -6e-8, 210.0, -140.0,
                 ];
                 let u = to_regular(p);
-                let analytic = jacobian(&samples, toe, system, u, &indices);
+                let analytic = jacobian(&samples, toe, system, u, &indices, Level::new());
+                let pinned_indices: Vec<_> = (0..15).filter(|&i| i != 6).collect();
+                for level in simd_levels() {
+                    assert_eq!(
+                        jacobian(&samples, toe, system, u, &indices, level),
+                        analytic,
+                        "{level:?}: Jacobian differs"
+                    );
+                    assert_eq!(
+                        jacobian(&samples, toe, system, u, &pinned_indices, level),
+                        analytic.clone().remove_column(6),
+                        "{level:?}: pinned Jacobian differs"
+                    );
+                }
                 for (column, &h) in steps.iter().enumerate() {
                     let mut above = u;
                     let mut below = u;
