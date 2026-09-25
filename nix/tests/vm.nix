@@ -3,14 +3,17 @@ let
   cache = "/var/cache/weinav-forge";
   state = "/var/lib/weinav-forge";
   public = "/var/lib/weinav-forge-public";
+
   fixture = pkgs.writeShellApplication {
     name = "weinav-forge";
+
     runtimeInputs = with pkgs; [
       coreutils
       curl
       jq
       zip
     ];
+
     text = ''
       command=$1
       shift
@@ -69,6 +72,7 @@ let
       exit "$failed"
     '';
   };
+
   compressor =
     name: package:
     pkgs.writeShellApplication {
@@ -92,6 +96,7 @@ let
         exec ${package}/bin/${name} "$@"
       '';
     };
+
   reader = pkgs.writeText "weinav-reader.py" ''
     import gzip
     import hashlib
@@ -130,16 +135,20 @@ in
 pkgs.testers.runNixOSTest {
   name = "weinav-forge-publication";
   requiredFeatures.kvm = false;
+
   nodes.machine = { ... }: {
     imports = [ module ];
     virtualisation.memorySize = 1536;
+
     services.weinav-forge = {
       enable = true;
       package = fixture;
+
       instances.watch = {
         flavor = "huawei";
         systems = [ "gps" ];
       };
+
       instances.secondary = {
         flavor = "open-plus";
         systems = [
@@ -148,18 +157,23 @@ pkgs.testers.runNixOSTest {
         ];
         agnss = false;
       };
+
       compression.gzip.package = compressor "pigz" pkgs.pigz;
       compression.brotli.package = compressor "brotli" pkgs.brotli;
+
       fetch.timerConfig = {
         OnBootSec = "3s";
         OnUnitActiveSec = "10min";
       };
+
       nginx.enable = true;
       nginx.virtualHost = "localhost";
     };
+
     systemd.services.fixture-source = {
       wantedBy = [ "multi-user.target" ];
       before = [ "weinav-forge-fetch.service" ];
+
       serviceConfig = {
         ExecStart = "${pkgs.python3}/bin/python -m http.server 8081 --bind 127.0.0.1 --directory /srv/fixture";
         DynamicUser = true;
@@ -175,10 +189,12 @@ pkgs.testers.runNixOSTest {
         ];
       };
     };
+
     systemd.tmpfiles.rules = [
       "d /srv/fixture 0755 root root -"
       "f /srv/fixture/source 0644 root root - first-generation"
     ];
+
     environment.systemPackages = with pkgs; [
       acl
       curl
@@ -188,6 +204,7 @@ pkgs.testers.runNixOSTest {
       jq
     ];
   };
+
   testScript = ''
     import json
 

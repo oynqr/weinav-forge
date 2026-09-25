@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
+
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -52,6 +53,7 @@
                   "rustfmt"
                   "rust-src"
                 ];
+
                 targets = [ target ];
               }
             );
@@ -69,6 +71,7 @@
 
             cargoVendorDir = craneLib.vendorMultipleCargoDeps {
               inherit (craneLib.findCargoFiles src) cargoConfigs;
+
               cargoLockList = [
                 ./Cargo.lock
                 "${rustSource}/lib/rustlib/src/rust/library/Cargo.lock"
@@ -118,6 +121,7 @@
             lib.mkDefault
               self.packages.${pkgs.stdenv.hostPlatform.system}.weinav-forge;
         };
+
       nixosModules.weinav-forge = self.nixosModules.default;
 
       packages = forAllSystems (system: {
@@ -142,11 +146,13 @@
           );
 
           format = this.craneLib.cargoFmt { inherit (this.crateArgs) src; };
+
           module-evaluation = import ./nix/tests/evaluation.nix {
             inherit nixpkgs system;
             inherit (this) pkgs;
             module = self.nixosModules.default;
           };
+
           module-vm = import ./nix/tests/vm.nix {
             inherit (this) pkgs;
             module = self.nixosModules.default;
@@ -174,7 +180,6 @@
             LIBCLANG_PATH = "${this.pkgs.libclang.lib}/lib";
             LD_LIBRARY_PATH = lib.makeLibraryPath [ this.pkgs.stdenv.cc.cc.lib ];
           };
-
         }
       );
     };

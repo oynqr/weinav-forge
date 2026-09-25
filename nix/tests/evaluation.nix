@@ -6,10 +6,12 @@
 }:
 let
   inherit (pkgs) lib;
+
   evaluate =
     settings:
     (nixpkgs.lib.nixosSystem {
       inherit system;
+
       modules = [
         module
         {
@@ -19,10 +21,12 @@ let
         settings
       ];
     }).config;
+
   valid =
     config:
     builtins.all (a: a.assertion || !(lib.hasPrefix "weinav-forge:" a.message)) config.assertions;
   disabled = evaluate { };
+
   enabled = evaluate {
     services.weinav-forge = {
       enable = true;
@@ -30,8 +34,10 @@ let
       nginx.enable = true;
       nginx.virtualHost = "example.test";
     };
+
     services.nginx.virtualHosts."example.test".locations."/other".return = "204";
   };
+
   custom = evaluate {
     services.weinav-forge = {
       enable = true;
@@ -39,25 +45,30 @@ let
       stateDirectory = "/srv/gnss-state";
       outputDirectory = "/srv/gnss-public";
       build.threads = 80;
+
       instances.first = {
         flavor = "huawei";
         systems = [ "gps" ];
         fitRms = 0.5;
       };
+
       instances.second = {
         flavor = "open";
         allowDegraded = true;
       };
     };
   };
+
   invalidName = evaluate {
     services.weinav-forge.enable = true;
     services.weinav-forge.instances."../escape".flavor = "huawei";
   };
+
   invalidOpen = evaluate {
     services.weinav-forge.enable = true;
     services.weinav-forge.instances.watch.flavor = "open";
   };
+
   invalidPaths = evaluate {
     services.weinav-forge = {
       enable = true;
@@ -65,7 +76,9 @@ let
       instances.watch.flavor = "huawei";
     };
   };
+
   noInstances = evaluate { services.weinav-forge.enable = true; };
+
   wrongType = builtins.tryEval (
     builtins.deepSeq
       (evaluate {

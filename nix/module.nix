@@ -13,6 +13,7 @@ let
     mkPackageOption
     types
     ;
+
   cfg = config.services.weinav-forge;
   instances = lib.filterAttrs (_: instance: instance.enable) cfg.instances;
   names = builtins.attrNames instances;
@@ -24,6 +25,7 @@ let
   runtime = "/run/weinav-forge";
   executable = "${cfg.package}/bin/weinav-forge";
   quote = lib.escapeShellArg;
+
   commonArgs =
     instance:
     [
@@ -35,16 +37,20 @@ let
       cfg.cacheDirectory
     ]
     ++ lib.optional (!instance.agnss) "--no-agnss";
+
   flavors = lib.unique (map (name: instances.${name}.flavor) names);
+
   fetchCommands = lib.concatMapStringsSep "\n" (
     flavor:
     let
       selected = builtins.filter (i: i.flavor == flavor) (builtins.attrValues instances);
+
       union = {
         inherit flavor;
         systems = lib.unique (lib.concatMap (i: i.systems) selected);
         agnss = builtins.any (i: i.agnss) selected;
       };
+
       sources = lib.concatLists (
         lib.mapAttrsToList (
           role: urls:
@@ -57,6 +63,7 @@ let
     in
     "${executable} fetch ${lib.escapeShellArgs (commonArgs union ++ sources)}"
   ) flavors;
+
   cacheCleanup = ''
     find ${quote "${cfg.cacheDirectory}/urls"} -maxdepth 1 -type f -name '*.json' \
       -mmin +${toString (cfg.retention.cacheMaxAgeHours * 60)} -delete
@@ -75,8 +82,10 @@ let
     done < <(find ${quote "${cfg.cacheDirectory}/objects"} -maxdepth 1 -type f \
       -mmin +${toString (cfg.retention.cacheMaxAgeHours * 60)} -print0)
   '';
+
   fetchScript = pkgs.writeShellApplication {
     name = "weinav-forge-fetch";
+
     runtimeInputs = with pkgs; [
       coreutils
       findutils
@@ -84,6 +93,7 @@ let
       jq
       util-linux
     ];
+
     text = ''
       exec 9>${runtime}/lock
       flock -x 9
@@ -91,6 +101,7 @@ let
       ${cacheCleanup}
     '';
   };
+
   compressFile = file: ''
     ${lib.optionalString cfg.compression.gzip.enable ''
       ${cfg.compression.gzip.package}/bin/pigz -n -${toString cfg.compression.gzip.level} \
@@ -111,6 +122,7 @@ let
       fi
     ''}
   '';
+
   variantsFile = pkgs.writeText "weinav-forge-variants.json" (
     builtins.toJSON (
       lib.mapAttrsToList (name: instance: {
@@ -121,6 +133,7 @@ let
       }) instances
     )
   );
+
   buildOne =
     name: instance:
     let
@@ -174,6 +187,7 @@ let
         echo "Update failed for ${name}; keep its last published generation" >&2
       fi
     '';
+
   buildManifest = ''
     (
       set -e
@@ -230,6 +244,7 @@ let
       echo "Manifest update failed; keep the last published manifest" >&2
     fi
   '';
+
   generationCleanup =
     name:
     let
@@ -262,8 +277,10 @@ let
         fi
       fi
     '';
+
   buildScript = pkgs.writeShellApplication {
     name = "weinav-forge-build";
+
     runtimeInputs = with pkgs; [
       coreutils
       diffutils
@@ -272,6 +289,7 @@ let
       unzip
       util-linux
     ];
+
     text = ''
       exec 9>${runtime}/lock
       flock -x 9
@@ -303,6 +321,7 @@ let
       exit "$failed"
     '';
   };
+
   sandbox = {
     Type = "oneshot";
     DynamicUser = true;
@@ -339,11 +358,13 @@ let
     Nice = 10;
     NoExecPaths = paths ++ [ runtime ];
   };
+
   paths = [
     cfg.cacheDirectory
     cfg.stateDirectory
     cfg.outputDirectory
   ];
+
   pathValid =
     path:
     builtins.match "/[A-Za-z0-9_+./-]+" path != null
@@ -356,6 +377,7 @@ let
         ".."
       ])
     ) (lib.tail (lib.splitString "/" path));
+
   serveConfig = mime: ''
     default_type ${mime};
     types { }
@@ -370,6 +392,7 @@ let
     autoindex off;
     limit_except GET { deny all; }
   '';
+
   currentLocations =
     key: uri: directory: file: mime:
     let
@@ -395,6 +418,7 @@ let
         '';
       }
     ];
+
   locations = lib.listToAttrs (
     currentLocations "manifest" "manifest.json" ".manifest" "manifest.json" "application/json"
     ++ lib.concatMap (
@@ -419,21 +443,25 @@ in
   options.services.weinav-forge = {
     enable = mkEnableOption "scheduled GNSS archive builds";
     package = mkPackageOption pkgs "weinav-forge" { default = null; };
+
     cacheDirectory = mkOption {
       type = types.str;
       default = "/var/cache/weinav-forge";
       description = "Directory for source objects and manifests. Only the fetch service can write here.";
     };
+
     stateDirectory = mkOption {
       type = types.str;
       default = "/var/lib/weinav-forge";
       description = "Private directory for build reports and staging files.";
     };
+
     outputDirectory = mkOption {
       type = types.str;
       default = "/var/lib/weinav-forge-public";
       description = "Directory for immutable published generations and current links.";
     };
+
     instances = mkOption {
       default = { };
       description = "Archive products, with one stable URL per instance name.";
@@ -492,6 +520,7 @@ in
         }
       );
     };
+
     fetch = {
       timerConfig = mkOption {
         type = types.attrsOf utils.systemdUtils.unitOptions.unitOption;
@@ -517,6 +546,7 @@ in
         description = "Optional source URL fallback chains, indexed by CLI source role.";
       };
     };
+
     build = {
       timeout = mkOption {
         type = types.str;
@@ -529,12 +559,14 @@ in
         description = "Maximum processing threads shared by all instances. Null uses the available CPU thread count at run time. At most this many instances are processed at the same time.";
       };
     };
+
     compression = {
       threads = mkOption {
         type = types.ints.positive;
         default = 1;
         description = "Maximum pigz compression threads. Brotli uses one thread.";
       };
+
       gzip = {
         enable = mkOption {
           type = types.bool;
@@ -548,6 +580,7 @@ in
         };
         package = mkPackageOption pkgs "pigz" { };
       };
+
       brotli = {
         enable = mkOption {
           type = types.bool;
@@ -562,6 +595,7 @@ in
         package = mkPackageOption pkgs "brotli" { };
       };
     };
+
     limits = {
       memoryMax = mkOption {
         type = types.str;
@@ -581,6 +615,7 @@ in
         description = "Task limit for each service. Infinity permits automatic worker selection on hosts with many CPU threads.";
       };
     };
+
     retention = {
       generations = mkOption {
         type = types.ints.positive;
@@ -598,6 +633,7 @@ in
         description = "Age limit for unreferenced source objects and obsolete URL metadata. Committed manifests keep their source objects.";
       };
     };
+
     nginx = {
       enable = mkEnableOption "nginx locations for published archives";
       virtualHost = mkOption {
@@ -649,16 +685,19 @@ in
         message = "weinav-forge: nginx.location must be a path prefix with leading and trailing slashes.";
       }
     ];
+
     users = {
       groups = {
         ${cacheGroup} = { };
         ${buildGroup} = { };
         ${publicGroup} = { };
       };
+
       users = {
         ${config.services.nginx.user}.extraGroups = lib.mkIf cfg.nginx.enable [ publicGroup ];
       };
     };
+
     systemd = {
       tmpfiles.rules = [
         "d ${cfg.cacheDirectory} 2770 root ${cacheGroup} -"
@@ -676,6 +715,7 @@ in
         "d ${runtime} 0750 root ${cacheGroup} -"
         "f ${runtime}/lock 0660 root ${cacheGroup} -"
       ];
+
       timers.weinav-forge-fetch = {
         description = "Update GNSS source data";
         wantedBy = [ "timers.target" ];
@@ -683,16 +723,20 @@ in
           Unit = "weinav-forge-fetch.service";
         };
       };
+
       services = {
         weinav-forge-fetch = {
           description = "Fetch GNSS source data";
           wants = [ "network-online.target" ];
+
           after = [
             "network-online.target"
             "systemd-tmpfiles-setup.service"
           ];
+
           unitConfig.OnSuccess = "weinav-forge-build.service";
           environment.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
           serviceConfig = sandbox // {
             User = fetchUser;
             Group = cacheGroup;
@@ -713,9 +757,11 @@ in
             ];
           };
         };
+
         weinav-forge-build = {
           description = "Build, compress and publish GNSS archives";
           after = [ "systemd-tmpfiles-setup.service" ];
+
           serviceConfig = sandbox // {
             User = buildUser;
             Group = buildGroup;
@@ -739,9 +785,11 @@ in
         };
       };
     };
+
     services.nginx = mkIf cfg.nginx.enable {
       enable = true;
       additionalModules = [ pkgs.nginxModules.brotli ];
+
       virtualHosts.${cfg.nginx.virtualHost}.locations = locations // {
         "${cfg.nginx.location}".return = "404";
       };
