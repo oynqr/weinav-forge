@@ -425,7 +425,8 @@ pub fn fit(
     }
     let (mut r, mut orbit, mut geometry) = residual(from_regular(u), None)?;
     let mut score = r.norm_squared();
-    let mut damping = 1e-3;
+    const MIN_DAMPING: f64 = 1e-12;
+    let mut damping = MIN_DAMPING;
     let mut iterations = 0;
     let simd_level = Level::new();
     for iteration in 0..80 {
@@ -491,7 +492,7 @@ pub fn fit(
                     orbit = candidate_orbit;
                     geometry = candidate_geometry;
                     score = next_score;
-                    damping = (damping * 0.3).max(1e-12);
+                    damping = (damping * 0.3).max(MIN_DAMPING);
                     improvement = true;
                     break;
                 }
@@ -589,6 +590,68 @@ pub fn glonass_acceleration(p: [f64; 3], v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damped_fit_recovers_noisy_orbits_from_displaced_starts() -> Result<()> {
+        for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
+            for eccentricity in [0.0, 1e-8, 1e-6, 0.00035, 0.02, 0.1, 0.49] {
+                let parameters = [
+                    5282.61,
+                    eccentricity,
+                    0.96,
+                    1.2,
+                    -0.7,
+                    0.4,
+                    2.1e-9,
+                    -2.3e-9,
+                    3e-10,
+                    1.4e-6,
+                    -2.2e-6,
+                    8e-8,
+                    -6e-8,
+                    210.0,
+                    -140.0,
+                ];
+                let toe = 230_400.0;
+                let observed = |dt: f64| -> Result<[f64; 3]> {
+                    let xyz = position(&parameters, dt, toe, system, false)?;
+                    Ok(std::array::from_fn(|axis| {
+                        xyz[axis] + 0.005 * (dt / 1800.0 + axis as f64).sin()
+                    }))
+                };
+                let samples = (-24..=24)
+                    .map(|index| {
+                        let dt = f64::from(index) * 150.0;
+                        Ok((dt, observed(dt)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for displacement in [0.01, 1.0] {
+                    let mut start = parameters;
+                    start[0] += displacement;
+                    start[2] += displacement * 1e-3;
+                    start[3] -= displacement * 1e-3;
+                    start[5] += displacement * 1e-3;
+                    let pinned = (system == System::Qzs).then_some(parameters[6]);
+                    let fitted = fit(&samples, toe, system, start, pinned)?;
+                    assert!(
+                        fitted.rms < 0.02,
+                        "{system:?}, eccentricity {eccentricity}, displacement {displacement}: RMS {}",
+                        fitted.rms
+                    );
+                    for dt in [-3525.0, -1725.0, 75.0, 1875.0, 3525.0] {
+                        let expected = Vector3::from(observed(dt)?);
+                        let actual =
+                            Vector3::from(position(&fitted.parameters, dt, toe, system, false)?);
+                        assert!(
+                            (actual - expected).norm() < 0.05,
+                            "{system:?}, eccentricity {eccentricity}, displacement {displacement}: position differs"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn cached_trigonometry_preserves_signed_zero() {
