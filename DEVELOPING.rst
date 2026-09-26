@@ -44,6 +44,12 @@ These tests check seed and EXTRA data against captured bytes. They also
 check RTCM field encoding and decoding, and rejection of invalid QZSS data.
 Normal test runs skip these tests. Use the command above to run them.
 
+Other ignored tests use the reviewed seed, broadcast snapshot and
+``missing_vs_huawei.csv`` from the generation 3 review. Set
+``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. These
+tests check that the 47 formerly dropped seed records fit inside the
+measured envelope, and that the BeiDou GEO record counts match Huawei.
+
 Processing performance
 ----------------------
 
@@ -206,6 +212,30 @@ quantised orbit check permits 0.5 metre beyond the configured fit limit.
 Nearly circular orbits use numerical derivatives because the analytic
 coordinate conversion divides by eccentricity.
 
+A seed refit that leaves the measured harmonic envelope is fitted again with
+the harmonic terms bounded to the envelope. BeiDou GEO satellites use the
+extra rotation of the BeiDou ICD. BeiDou records use the GPS gravity
+constant, as Huawei's records do; broadcast evaluation keeps the ICD value.
+Records carry zero ``gamma_n`` and ``af2``, as genuine Huawei files do.
+BeiDou prediction clocks have a common offset that drifts against the seed.
+The builder removes the median offset against the seed in each epoch, or
+against broadcast when there is no seed, and reports it as
+``clock_alignment_ns``.
+
+The last broadcast source file is the broadcast health snapshot. Health
+screening uses the newest fresh record in this file only, so the external
+gate can repeat each decision from the published file. The processor writes
+a copy of this file next to the report only when the checks pass. Orbit
+screening, AGNSS and Klobuchar data use all broadcast files. The newest
+Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
+
+The report uses the ``gb-gnss-zipbuilder/report/1`` format. The gate reads
+the ``format``, ``flavor``, ``built_at_unix``, ``seed``, ``health``,
+``plan`` and ``degraded`` report fields; the other fields are for diagnosis.
+``seed`` names the seed version, and ``plan`` names the source for each
+constellation and epoch range. The internal source policy is under
+``policy``.
+
 Service publication
 -------------------
 
@@ -225,8 +255,8 @@ The VM test checks these restrictions after forced UID changes.
 Each build first writes private staging files. It then makes gzip and Brotli
 sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
 It keeps a sidecar only if its size is less than the original file size.
-This rule applies to ZIP files and the discovery manifest, including
-sidecars from earlier publications.
+This rule applies to ZIP files, reports and the discovery manifest,
+including sidecars from earlier publications.
 The completed set moves to a generation directory on the output filesystem.
 A single atomic link replacement publishes the set.
 
@@ -234,7 +264,10 @@ Build ``manifest.json`` from published metadata, not the current instance
 settings: an instance can still serve an older build after an update fails.
 Keep original timestamps and use URLs for specific generations so checksums
 remain valid across updates. Publish the manifest and its sidecars through
-their own atomic link. Keep source data, reports and build metadata private.
+their own atomic link. Publish each passed report and its broadcast health
+snapshot in the generation directory, because the external gate needs both.
+Check the snapshot checksum against the report before publication. Keep the
+seed, the other source data and the private report copies private.
 
 Cleanup must keep each current generation and every generation named in the
 current manifest. Failed updates and reboots must keep the previous output,

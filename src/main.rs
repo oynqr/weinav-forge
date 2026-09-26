@@ -109,7 +109,7 @@ struct Process {
     #[arg(
         long,
         default_value = "output",
-        help = "Write ephemeris.zip and report.json to this staging directory."
+        help = "Write ephemeris.zip, report.json and the broadcast health file to this staging directory."
     )]
     output: PathBuf,
     #[arg(long, help = "Write the build report to this path.")]

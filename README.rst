@@ -6,7 +6,8 @@ One Rust executable has two commands:
 
 * ``fetch`` gets source files and saves them in a cache.
 * ``process`` reads local files, builds the products, checks the results, and
-  writes ``ephemeris.zip`` and ``report.json``. It does not use the network.
+  writes ``ephemeris.zip``, ``report.json`` and the broadcast health file. It
+  does not use the network.
 
 Build
 -----
@@ -109,6 +110,9 @@ If processing refuses output, it saves the report and removes
 ``ephemeris.zip`` in the selected staging directory. Read entries with
 ``status: fail`` in the report. Use a private staging directory for processing.
 The NixOS module below manages a separate published directory.
+
+The broadcast health file is a copy of the broadcast data that the tool used
+to find unhealthy satellites.
 
 Exit status is 0 for success, 2 for a command-line parsing error, 3 when a
 source is unavailable, 4 when output is refused, and 1 for another error.
@@ -225,6 +229,9 @@ has ``version`` set to 1 and a ``variants`` list. Each entry has these fields:
 * ``flavor``, ``systems`` and ``agnss``: source policy, constellations and
   AGNSS selection. Older files can lack these three fields until the next
   successful build.
+* ``report_url``: URL of the build report for this file version.
+* ``broadcast_url``: URL of the broadcast health file for this file version.
+  Older files can lack ``report_url`` and ``broadcast_url``.
 
 Use ``url`` to download a file and check its checksum. The file at
 ``latest_url`` can change after you read the manifest. Read the manifest
@@ -287,6 +294,7 @@ Read service results and reports with:
   cat /var/lib/weinav-forge/reports/watch.json
 
 The service keeps each variant's latest report in the ``reports`` directory,
-including reports for refused output. The journal shows the saved report path
-and each failed check. Temporary report paths from processing are removed at
-the end of the build.
+including reports for refused output. Each published file version also
+includes its report and its broadcast health file. The journal shows the
+saved report path and each failed check. Temporary report paths from
+processing are removed at the end of the build.
