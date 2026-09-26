@@ -256,9 +256,8 @@ pub struct Products {
     pub screened: usize,
 }
 
-fn clock_fit(samples: &[(f64, State)], quadratic: bool) -> Result<[f64; 3]> {
-    let columns = if quadratic { 3 } else { 2 };
-    let matrix = nalgebra::DMatrix::from_fn(samples.len(), columns, |i, j| {
+fn clock_fit(samples: &[(f64, State)]) -> Result<[f64; 3]> {
+    let matrix = nalgebra::DMatrix::from_fn(samples.len(), 2, |i, j| {
         (samples[i].0 / 3600.0).powi(j as i32)
     });
     let clocks =
@@ -267,15 +266,7 @@ fn clock_fit(samples: &[(f64, State)], quadratic: bool) -> Result<[f64; 3]> {
         .lu()
         .solve(&(matrix.transpose() * clocks))
         .context("singular clock fit")?;
-    Ok([
-        solution[0],
-        solution[1] / 3600.0,
-        if quadratic {
-            solution[2] / 3600_f64.powi(2)
-        } else {
-            0.0
-        },
-    ])
+    Ok([solution[0], solution[1] / 3600.0, 0.0])
 }
 
 fn kepler(
@@ -339,7 +330,7 @@ fn kepler(
             0.0,
         ]
     };
-    let mut clock = clock_fit(&samples, system == System::Bds && provider != "hiee")?;
+    let mut clock = clock_fit(&samples)?;
     if system == System::Bds && provider != "hiee" {
         let gamma = (1561.098_f64 / 1268.52).powi(2);
         clock[0] += gamma / (gamma - 1.0) * delay[0];
@@ -348,7 +339,7 @@ fn kepler(
     let bytes = record::encode(system, &values)?;
     let values = record::decode(system, &bytes)?;
     record::validate(system, &values)?;
-    record::validate_envelope(system, &values, provider == "hiee")?;
+    record::validate_envelope(system, &values)?;
     let p = orbit::parameters(&values)?;
     let mut residual = 0.0;
     for (dt, state) in &samples {
@@ -400,14 +391,6 @@ fn glonass(
         ("slot", f64::from(id - 1)),
         ("t_b", (time - leap as f64 + 10800.0).rem_euclid(86400.0)),
         ("tau_n", -clock_state.clock),
-        (
-            "gamma_n",
-            if clock == "hiee" {
-                0.0
-            } else {
-                clock_state.drift
-            },
-        ),
         ("flag", 1.0),
     ] {
         values.insert(name.into(), value);

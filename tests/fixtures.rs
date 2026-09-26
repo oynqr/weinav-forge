@@ -59,7 +59,7 @@ fn reviewed_missing_seed_records_fit_inside_the_envelope() -> Result<()> {
         let bytes = record::encode(system, &values)?;
         let values = record::decode(system, &bytes)?;
         record::validate(system, &values)?;
-        record::validate_envelope(system, &values, true)
+        record::validate_envelope(system, &values)
             .with_context(|| format!("{} e{}", fields[2], fields[3]))?;
         checked += 1;
     }
@@ -117,7 +117,7 @@ fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
             let id = values["sv"] as usize;
             if id < 4 {
                 counts[id] += 1;
-                record::validate_envelope(System::Bds, &values, true)?;
+                record::validate_envelope(System::Bds, &values)?;
             }
         }
     }

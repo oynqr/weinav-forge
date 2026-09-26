@@ -183,30 +183,13 @@ pub fn validate(system: System, values: &BTreeMap<String, f64>) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_envelope(
-    system: System,
-    values: &BTreeMap<String, f64>,
-    seed_clock: bool,
-) -> Result<()> {
+pub fn validate_envelope(system: System, values: &BTreeMap<String, f64>) -> Result<()> {
     for &(name, low, high) in envelopes::bounds(system) {
-        if system == System::Glonass && name == "gamma_n" && !seed_clock {
-            ensure!(
-                values[name].abs() <= 1023.0 * 2_f64.powi(-40),
-                "GLONASS clock drift exceeds ICD range"
-            );
-        } else if system == System::Bds && name == "af2" && !seed_clock {
-            ensure!(
-                values[name] >= -1024.0 * 2_f64.powi(-66)
-                    && values[name] <= 1023.0 * 2_f64.powi(-66),
-                "BeiDou clock curvature exceeds ICD range"
-            );
-        } else {
-            let value = values[name];
-            ensure!(
-                value >= low && value <= high,
-                "{name}={value:e} outside measured envelope [{low:e}, {high:e}]"
-            );
-        }
+        let value = values[name];
+        ensure!(
+            value >= low && value <= high,
+            "{name}={value:e} outside measured envelope [{low:e}, {high:e}]"
+        );
     }
     Ok(())
 }
@@ -328,6 +311,22 @@ pub fn parse_container(system: System, data: &[u8]) -> Result<Vec<Epoch>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_curvature_fields_must_be_zero_for_every_provider() {
+        for (system, name, value) in [
+            (System::Glonass, "gamma_n", 2_f64.powi(-40)),
+            (System::Bds, "af2", 2_f64.powi(-66)),
+        ] {
+            let mut values: BTreeMap<String, f64> = envelopes::bounds(system)
+                .iter()
+                .map(|&(field, low, high)| (field.to_owned(), (low + high) / 2.0))
+                .collect();
+            assert!(validate_envelope(system, &values).is_ok());
+            values.insert(name.into(), value);
+            assert!(validate_envelope(system, &values).is_err());
+        }
+    }
 
     #[test]
     fn qzss_negative_delay_has_zero_pad() -> Result<()> {

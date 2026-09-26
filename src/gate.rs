@@ -201,11 +201,8 @@ pub fn inspect(
                             {
                                 invalid.push(e.to_string());
                             }
-                            if let Err(e) = record::validate_envelope(
-                                system,
-                                &values,
-                                report.is_some_and(|r| r.clock == "hiee"),
-                            ) && invalid.len() < 20
+                            if let Err(e) = record::validate_envelope(system, &values)
+                                && invalid.len() < 20
                             {
                                 invalid.push(e.to_string());
                             }
