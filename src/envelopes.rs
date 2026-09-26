@@ -1,4 +1,5 @@
 use crate::policy::System;
+pub const GATE_SHA256: &str = "74f6fda4e2864350006d595c85260ddceb55121458ed92d6c647018b7102d044";
 pub fn bounds(system: System) -> &'static [(&'static str, f64, f64)] {
     match system {
         System::Gps => &[

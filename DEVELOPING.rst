@@ -237,7 +237,15 @@ broadcast when there is no seed, and reports it as ``clock_alignment_ns``.
 
 The measured field envelopes in ``src/envelopes.rs`` are the ``env_min`` and
 ``env_max`` limits of the external gate's ``g2_envelopes.json``, multiplied by
-the field scale. Update them together when the gate's corpus changes.
+the field scale. Fields without an envelope there use their storage range.
+``GATE_SHA256`` holds the SHA-256 of that file, and each report gives it as
+``envelopes_sha256``. Set ``WEINAV_GATE_ENVELOPES`` to the file and run the
+ignored test ``envelopes_match_the_gate`` before each build: it fails when the
+file or the table has changed. Then copy the new limits and hash together.
+The report lists a record that is outside an envelope in
+``envelope_removals``, not in ``removals``. Such a record needs a comparison
+with Huawei's output and, if it is genuine, a change of the gate's corpus.
+Do not change a limit only to keep the record.
 
 Seed arcs with the flag set are not used. A Kepler record is removed when one
 of its fit samples falls in such an arc, and a GLONASS record when its time

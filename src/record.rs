@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
 
 #[path = "envelopes.rs"]
-mod envelopes;
+pub mod envelopes;
 #[path = "record_fields.rs"]
 mod schema;
 
@@ -174,13 +174,38 @@ pub fn fields_on_limit(system: System, values: &BTreeMap<String, f64>) -> Vec<&'
         .collect()
 }
 
+#[derive(Debug)]
+pub struct OutsideEnvelope {
+    pub field: &'static str,
+    pub value: f64,
+    pub low: f64,
+    pub high: f64,
+}
+
+impl std::fmt::Display for OutsideEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}={:e} outside measured envelope [{:e}, {:e}]",
+            self.field, self.value, self.low, self.high
+        )
+    }
+}
+
+impl std::error::Error for OutsideEnvelope {}
+
 pub fn validate_envelope(system: System, values: &BTreeMap<String, f64>) -> Result<()> {
-    for &(name, low, high) in envelopes::bounds(system) {
-        let value = values[name];
-        ensure!(
-            value >= low && value <= high,
-            "{name}={value:e} outside measured envelope [{low:e}, {high:e}]"
-        );
+    for &(field, low, high) in envelopes::bounds(system) {
+        let value = values[field];
+        if !(value >= low && value <= high) {
+            return Err(OutsideEnvelope {
+                field,
+                value,
+                low,
+                high,
+            }
+            .into());
+        }
     }
     Ok(())
 }
@@ -315,7 +340,11 @@ mod tests {
                 .collect();
             assert!(validate_envelope(system, &values).is_ok());
             values.insert(name.into(), value);
-            assert!(validate_envelope(system, &values).is_err());
+            let error = validate_envelope(system, &values).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<OutsideEnvelope>().map(|e| e.field),
+                Some(name)
+            );
         }
     }
 

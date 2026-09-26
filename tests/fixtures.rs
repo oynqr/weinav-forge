@@ -519,3 +519,47 @@ fn known_bad_qzss_is_rejected_without_losing_container_geometry() -> Result<()> 
     assert_eq!(rejected, 10);
     Ok(())
 }
+
+#[test]
+#[ignore = "requires the external gate's g2_envelopes.json"]
+fn envelopes_match_the_gate() -> Result<()> {
+    let path = std::env::var_os("WEINAV_GATE_ENVELOPES")
+        .context("set WEINAV_GATE_ENVELOPES to the external gate's g2_envelopes.json")?;
+    let bytes = fs::read(path)?;
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        record::envelopes::GATE_SHA256
+    );
+    let gate: serde_json::Value = serde_json::from_slice(&bytes)?;
+    for system in System::ALL {
+        let fields = gate["constellations"][system.name()]["fields"]
+            .as_object()
+            .context("gate constellation")?;
+        let bounds = |name: &str| {
+            let field = &fields[name];
+            let scale = field["scale"].as_f64()?;
+            record::envelopes::bounds(system)
+                .iter()
+                .find(|&&(n, _, _)| n == name)
+                .map(|&(_, low, high)| ((low / scale).round(), (high / scale).round()))
+        };
+        let limits = |name: &str, low: &str, high: &str| {
+            Some((fields[name][low].as_f64()?, fields[name][high].as_f64()?))
+        };
+        for name in fields.keys() {
+            if let Some(envelope) = limits(name, "env_min", "env_max") {
+                assert_eq!(bounds(name), Some(envelope), "{system:?} {name}");
+            }
+        }
+        for &(name, _, _) in record::envelopes::bounds(system) {
+            if fields[name]["env_min"].is_null() {
+                assert_eq!(
+                    bounds(name),
+                    limits(name, "store_min", "store_max"),
+                    "{system:?} {name}"
+                );
+            }
+        }
+    }
+    Ok(())
+}

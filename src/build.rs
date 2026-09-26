@@ -328,6 +328,7 @@ pub struct EpochReport {
     pub quantized_sigma_max_m: f64,
     pub clock_alignment_ns: Option<f64>,
     pub removals: Vec<String>,
+    pub envelope_removals: Vec<String>,
 }
 
 pub struct Products {
@@ -626,6 +627,7 @@ pub fn assemble(
                     quantized_sigma_max_m: 0.0,
                     clock_alignment_ns: None,
                     removals: Vec::new(),
+                    envelope_removals: Vec::new(),
                 };
                 let alignment = inputs.clock_alignment(system, clock, time as f64, at);
                 if let Ok(Some(offset)) = alignment {
@@ -693,7 +695,14 @@ pub fn assemble(
                                 report.quantized_sigma_max_m =
                                     report.quantized_sigma_max_m.max(quantized);
                             }
-                            Err(e) => report.removals.push(format!("{id} block {block}: {e:#}")),
+                            Err(e) => {
+                                let removal = format!("{id} block {block}: {e:#}");
+                                if e.chain().any(|c| c.is::<crate::record::OutsideEnvelope>()) {
+                                    report.envelope_removals.push(removal);
+                                } else {
+                                    report.removals.push(removal);
+                                }
+                            }
                         }
                     }
                     report.counts.push(records.len());
