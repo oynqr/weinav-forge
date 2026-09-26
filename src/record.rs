@@ -74,6 +74,32 @@ pub fn zero_values(system: System) -> BTreeMap<String, f64> {
         .collect()
 }
 
+pub fn fit_bounds(system: System) -> Vec<(usize, f64, f64)> {
+    crate::orbit::PARAMETER_NAMES
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matches!(index, 1 | 3..=5))
+        .filter_map(|(index, name)| {
+            envelopes::bounds(system)
+                .iter()
+                .find(|(field, _, _)| field == name)
+                .map(|&(_, low, high)| {
+                    let scale = if matches!(index, 2..=8) {
+                        std::f64::consts::PI
+                    } else {
+                        1.0
+                    };
+                    let low = if system == System::Qzs && index == 6 {
+                        low.max(0.0)
+                    } else {
+                        low
+                    };
+                    (index, low * scale, high * scale)
+                })
+        })
+        .collect()
+}
+
 pub fn truncate(system: System, values: &mut BTreeMap<String, f64>) {
     for field in schema::fields(system) {
         if let Some(value) = values.get_mut(field.name) {

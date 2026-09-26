@@ -309,7 +309,7 @@ fn kepler(
     } else {
         None
     };
-    let fit = orbit::fit(&positions, toe, system, start, pinned)?;
+    let fit = orbit::fit_in_envelope(&positions, toe, system, start, pinned)?;
     ensure!(
         fit.rms <= fit_limit,
         "fit RMS {:.3} m exceeds limit",

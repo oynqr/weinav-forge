@@ -1,7 +1,71 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf};
-use weinav_forge::{extra, policy::System, record, rtcm, seed::Seed};
+use weinav_forge::{extra, orbit, policy::System, record, rtcm, seed::Seed};
+
+#[test]
+#[ignore = "requires the author's reviewed seed and missing-record CSV"]
+fn reviewed_missing_seed_records_fit_inside_the_envelope() -> Result<()> {
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let seed = Seed::parse(&fs::read(root.join("HiEE_V2.dat"))?)?;
+    let csv = fs::read_to_string(root.join("missing_vs_huawei.csv"))?;
+    let mut checked = 0;
+    for row in csv.lines().skip(1) {
+        let fields: Vec<_> = row.split(',').collect();
+        if fields[6] != "dropped healthy record (fix)" {
+            continue;
+        }
+        let system = System::from_code(fields[2].chars().next().unwrap()).unwrap();
+        let id: u8 = fields[2][1..].parse()?;
+        let time: f64 = fields[4].parse()?;
+        let nav = seed.nav(system)?;
+        let sat = &nav[&id];
+        let state = sat.arc_at(time).unwrap().evaluate(time)?;
+        let toe = (time - if system == System::Bds { 14.0 } else { 0.0 }).rem_euclid(604800.0);
+        let samples = (-24..=24)
+            .map(|i| {
+                let dt = f64::from(i) * 150.0;
+                Ok((
+                    dt,
+                    sat.arc_at(time + dt).unwrap().evaluate(time + dt)?.position,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let fitted = orbit::fit_in_envelope(
+            &samples,
+            toe,
+            system,
+            orbit::initial(&state, toe, system)?,
+            None,
+        )?;
+        assert!(
+            fitted.rms <= 1.0,
+            "{} e{}: {}",
+            fields[2],
+            fields[3],
+            fitted.rms
+        );
+        let values = orbit::record_values(
+            system,
+            id,
+            time,
+            &fitted.parameters,
+            [state.clock, state.drift, 0.0],
+            [sat.tgd, 0.0],
+        );
+        let bytes = record::encode(system, &values)?;
+        let values = record::decode(system, &bytes)?;
+        record::validate(system, &values)?;
+        record::validate_envelope(system, &values, true)
+            .with_context(|| format!("{} e{}", fields[2], fields[3]))?;
+        checked += 1;
+    }
+    assert_eq!(checked, 47);
+    Ok(())
+}
 
 fn fixture(name: &str) -> Result<Vec<u8>> {
     let root = std::env::var_os("WEINAV_FIXTURES")

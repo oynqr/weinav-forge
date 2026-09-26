@@ -393,6 +393,35 @@ pub fn fit(
     start: Parameters,
     pinned_dn: Option<f64>,
 ) -> Result<Fit> {
+    fit_bounded(samples, toe, system, start, pinned_dn, &[])
+}
+
+pub fn fit_in_envelope(
+    samples: &[(f64, [f64; 3])],
+    toe: f64,
+    system: System,
+    start: Parameters,
+    pinned_dn: Option<f64>,
+) -> Result<Fit> {
+    let free = fit(samples, toe, system, start, pinned_dn)?;
+    let bounds = record::fit_bounds(system);
+    if bounds
+        .iter()
+        .all(|&(index, low, high)| (low..=high).contains(&free.parameters[index]))
+    {
+        return Ok(free);
+    }
+    fit_bounded(samples, toe, system, free.parameters, pinned_dn, &bounds)
+}
+
+fn fit_bounded(
+    samples: &[(f64, [f64; 3])],
+    toe: f64,
+    system: System,
+    start: Parameters,
+    pinned_dn: Option<f64>,
+    bounds: &[(usize, f64, f64)],
+) -> Result<Fit> {
     ensure!(samples.len() >= 9, "not enough samples to fit orbit");
     let indices: Vec<usize> = (0..15).filter(|&j| j != 6 || pinned_dn.is_none()).collect();
     let steps: [f64; 15] = [
@@ -420,6 +449,9 @@ pub fn fit(
         Ok((values, orbit, geometry))
     };
     let mut u = to_regular(start);
+    for &(index, low, high) in bounds {
+        u[index] = u[index].clamp(low, high);
+    }
     if let Some(dn) = pinned_dn {
         u[6] = dn;
     }
@@ -456,8 +488,20 @@ pub fn fit(
             j.column_mut(i).scale_mut(1.0 / norm);
         }
         let transposed = j.transpose();
-        let normal = &transposed * &j;
-        let gradient = transposed * &r;
+        let mut normal = &transposed * &j;
+        let mut gradient = transposed * &r;
+        for &(index, low, high) in bounds {
+            let Some(column) = indices.iter().position(|&i| i == index) else {
+                continue;
+            };
+            if u[index] <= low && gradient[column] >= 0.0
+                || u[index] >= high && gradient[column] <= 0.0
+            {
+                normal.row_mut(column).fill(0.0);
+                normal.column_mut(column).fill(0.0);
+                gradient[column] = 0.0;
+            }
+        }
         let mut improvement = false;
         let before = score;
         for _ in 0..20 {
@@ -472,6 +516,9 @@ pub fn fit(
             let mut next = u;
             for (i, &index) in indices.iter().enumerate() {
                 next[index] += delta[i] / norms[i];
+            }
+            for &(index, low, high) in bounds {
+                next[index] = next[index].clamp(low, high);
             }
             let parameters = from_regular(next);
             if parameters
@@ -590,6 +637,53 @@ pub fn glonass_acceleration(p: [f64; 3], v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_refit_recovers_orbits_outside_the_harmonic_envelope() -> Result<()> {
+        for system in [System::Gps, System::Galileo, System::Bds] {
+            for index in [11, 12] {
+                for upper in [false, true] {
+                    let mut truth = [
+                        5153.7, 0.001, 0.96, 1.2, -0.7, 0.4, 2.1e-9, -7.3e-9, 3e-10, 1.4e-6,
+                        -2.2e-6, 8e-8, -6e-8, 210.0, -140.0,
+                    ];
+                    if system == System::Galileo {
+                        truth[0] = 5440.6;
+                    }
+                    let bounds = record::fit_bounds(system);
+                    let &(_, low, high) = bounds.iter().find(|b| b.0 == index).unwrap();
+                    truth[index] = if upper { high + 6e-7 } else { low - 6e-7 };
+                    let toe = 230_400.0;
+                    let samples = (-24..=24)
+                        .map(|i| {
+                            let dt = f64::from(i) * 150.0;
+                            Ok((dt, position(&truth, dt, toe, system, false)?))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut clipped = truth;
+                    clipped[index] = clipped[index].clamp(low, high);
+                    let clipped_rms = (samples
+                        .iter()
+                        .map(|&(dt, xyz)| {
+                            let p = position(&clipped, dt, toe, system, false).unwrap();
+                            (0..3)
+                                .map(|axis| (p[axis] - xyz[axis]).powi(2))
+                                .sum::<f64>()
+                        })
+                        .sum::<f64>()
+                        / samples.len() as f64)
+                        .sqrt();
+                    let fitted = fit_in_envelope(&samples, toe, system, truth, None)?;
+                    assert!(fitted.rms < 1.0, "{system:?} {index}: {}", fitted.rms);
+                    assert!(fitted.rms < clipped_rms / 5.0);
+                    for &(index, low, high) in &bounds {
+                        assert!((low..=high).contains(&fitted.parameters[index]));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn damped_fit_recovers_noisy_orbits_from_displaced_starts() -> Result<()> {
