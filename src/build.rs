@@ -199,6 +199,14 @@ impl Inputs {
         arc.evaluate(time)
     }
 
+    fn seed_flagged(&self, system: System, id: u8, time: f64) -> bool {
+        self.satellites
+            .get(&system)
+            .and_then(|s| s.get(&id))
+            .and_then(|s| s.arc_at(time))
+            .is_some_and(|arc| arc.flag != 0)
+    }
+
     fn state(&self, system: System, id: u8, time: f64, provider: &str) -> Result<State> {
         if self.uses_broadcast(provider) {
             let nav = self
@@ -614,6 +622,9 @@ pub fn assemble(
                 for id in inputs.ids(system, orbit) {
                     let screen = (|| -> Result<()> {
                         inputs.screen_health(system, id, at)?;
+                        if orbit == "hiee" && inputs.seed_flagged(system, id, at.gps() as f64) {
+                            return Ok(());
+                        }
                         let reference = inputs
                             .broadcast
                             .nearest(system, id, at.gps() as f64)

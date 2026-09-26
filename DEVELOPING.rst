@@ -233,6 +233,11 @@ seed. The builder removes the median offset against the seed in each epoch, or
 against broadcast when there is no seed, and reports it as
 ``clock_alignment_ns``.
 
+Seed arcs with the flag set are not used. A Kepler record is removed when one
+of its fit samples falls in such an arc, and a GLONASS record when its time
+does. Each satellite's orbit is compared with broadcast at the build time,
+except when the seed arc at that time has the flag set.
+
 The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external
 gate can repeat each decision from the published file. The processor writes

@@ -190,6 +190,63 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed seed and broadcast snapshot"]
+fn reviewed_flagged_arc_at_build_time_removes_only_nearby_records() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2.dat")]),
+        (
+            Role::Broadcast,
+            vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
+        ),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let mut inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &[System::Bds],
+        false,
+        &local,
+    )?;
+    let at = Instant::parse("2026-09-26T05:43:07Z")?;
+    let now = at.gps() as f64;
+    let arc = inputs
+        .satellites
+        .get_mut(&System::Bds)
+        .and_then(|s| s.get_mut(&7))
+        .and_then(|s| s.arcs.iter_mut().find(|a| a.start <= now && now < a.end))
+        .context("C07 arc at the build time")?;
+    arc.flag = 1;
+    let (start, end) = (arc.start, arc.end);
+    let products = build::assemble(&inputs, Flavor::Huawei, &[System::Bds], false, at, 1.0)?;
+    let mut near = 0;
+    let mut far = 0;
+    for epoch in record::parse_container(System::Bds, &products.files["HW_PGNSS_BDS"])? {
+        let time = f64::from(epoch.time);
+        let shipped = epoch.blocks[0]
+            .iter()
+            .any(|bytes| record::decode(System::Bds, bytes).is_ok_and(|v| v["sv"] == 6.0));
+        if time + 7200.0 >= start && time - 7200.0 < end {
+            assert!(!shipped, "C07 shipped at {time} near the flagged arc");
+            near += 1;
+        } else if shipped {
+            far += 1;
+        }
+    }
+    assert!(near > 0 && far >= 20, "near {near}, far {far}");
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires the author's reviewed broadcast snapshot"]
 fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
     use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
