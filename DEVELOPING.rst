@@ -48,8 +48,10 @@ Other ignored tests use the reviewed seed, broadcast snapshot and
 ``missing_vs_huawei.csv`` from the generation 3 review. Set
 ``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. These
 tests check that the 47 formerly dropped seed records fit inside the
-measured envelope without bounds, and that the BeiDou GEO records are the
-same 139 records that Huawei ships.
+measured envelope without bounds. They also compare a build with Huawei's
+output: GPS records agree within 0.15 metre for 2 hours on each side of the
+epoch, the BeiDou GEO and QZSS records are the same as Huawei's, and no field
+is on its vendor limit unless Huawei's field is.
 
 Processing performance
 ----------------------

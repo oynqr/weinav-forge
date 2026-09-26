@@ -132,29 +132,46 @@ pub fn validate(system: System, values: &BTreeMap<String, f64>) -> Result<()> {
                 "QZSS negative mean-motion correction"
             );
         }
-        for field in schema::fields(system) {
-            let width = match field.name {
-                "delta_n" => 16,
-                "omegadot" => 24,
-                "idot" => 14,
-                "cuc" | "cus" | "cic" | "cis" | "crc" | "crs" => {
-                    if system == System::Bds {
-                        18
-                    } else {
-                        16
-                    }
-                }
-                _ => continue,
-            };
-            let raw = (values[field.name] / field.scale).round();
-            ensure!(
-                raw >= -(1_i64 << (width - 1)) as f64 && raw < (1_i64 << (width - 1)) as f64,
-                "{} exceeds vendor width",
-                field.name
-            );
+        for (name, raw, low, high) in vendor_ranges(system, values) {
+            ensure!(raw >= low && raw <= high, "{name} exceeds vendor width");
         }
     }
     Ok(())
+}
+
+fn vendor_ranges(
+    system: System,
+    values: &BTreeMap<String, f64>,
+) -> impl Iterator<Item = (&'static str, f64, f64, f64)> {
+    schema::fields(system).iter().filter_map(move |field| {
+        let width = match field.name {
+            "delta_n" => 16,
+            "omegadot" => 24,
+            "idot" => 14,
+            "cuc" | "cus" | "cic" | "cis" | "crc" | "crs" => {
+                if system == System::Bds {
+                    18
+                } else {
+                    16
+                }
+            }
+            _ => return None,
+        };
+        let high = (1_i64 << (width - 1)) as f64;
+        Some((
+            field.name,
+            (values[field.name] / field.scale).round(),
+            -high,
+            high - 1.0,
+        ))
+    })
+}
+
+pub fn fields_on_limit(system: System, values: &BTreeMap<String, f64>) -> Vec<&'static str> {
+    vendor_ranges(system, values)
+        .filter(|&(_, raw, low, high)| raw == low || raw == high)
+        .map(|(name, ..)| name)
+        .collect()
 }
 
 pub fn validate_envelope(system: System, values: &BTreeMap<String, f64>) -> Result<()> {

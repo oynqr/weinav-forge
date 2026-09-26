@@ -73,9 +73,48 @@ fn fixture(name: &str) -> Result<Vec<u8>> {
     Ok(fs::read(PathBuf::from(root).join(name))?)
 }
 
+type Cells = BTreeMap<(u8, usize), BTreeMap<String, f64>>;
+
+fn kepler_cells(system: System, container: &[u8]) -> Result<Cells> {
+    let mut cells = BTreeMap::new();
+    for (index, epoch) in record::parse_container(system, container)?
+        .iter()
+        .enumerate()
+    {
+        for bytes in &epoch.blocks[0] {
+            let values = record::decode(system, bytes)?;
+            record::validate(system, &values)?;
+            record::validate_envelope(system, &values)?;
+            cells.insert((values["sv"] as u8 + 1, index), values);
+        }
+    }
+    Ok(cells)
+}
+
+fn geo(values: &BTreeMap<String, f64>) -> bool {
+    orbit::is_geo(System::Bds, &orbit::parameters(values).unwrap())
+}
+
+fn largest_separation(
+    system: System,
+    ours: &BTreeMap<String, f64>,
+    huawei: &BTreeMap<String, f64>,
+) -> Result<f64> {
+    let geo = system == System::Bds && geo(ours);
+    let (p, q) = (orbit::parameters(ours)?, orbit::parameters(huawei)?);
+    let mut largest: f64 = 0.0;
+    for step in -24..=24 {
+        let dt = f64::from(step) * 300.0;
+        let a = orbit::position(&p, dt, ours["toe"], system, geo)?;
+        let b = orbit::position(&q, dt, huawei["toe"], system, geo)?;
+        largest = largest.max((0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt());
+    }
+    Ok(largest)
+}
+
 #[test]
-#[ignore = "requires the author's reviewed seed and broadcast snapshots"]
-fn reviewed_bds_geo_records_equal_huawei_set() -> Result<()> {
+#[ignore = "requires the author's reviewed seed, broadcast snapshot and Huawei output"]
+fn reviewed_kepler_records_match_huawei() -> Result<()> {
     use weinav_forge::{
         build,
         policy::{Flavor, Role},
@@ -92,49 +131,65 @@ fn reviewed_bds_geo_records_equal_huawei_set() -> Result<()> {
             vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
         ),
     ]);
+    let systems = [System::Gps, System::Bds, System::Qzs];
     let cache = tempfile::tempdir()?;
-    let inputs = build::Inputs::load(
-        cache.path(),
-        None,
-        Flavor::Huawei,
-        &[System::Bds],
-        false,
-        &local,
-    )?;
+    let inputs = build::Inputs::load(cache.path(), None, Flavor::Huawei, &systems, false, &local)?;
     let products = build::assemble(
         &inputs,
         Flavor::Huawei,
-        &[System::Bds],
+        &systems,
         false,
         Instant::parse("2026-09-26T05:43:07Z")?,
         1.0,
     )?;
-    let geo_cells = |container: &[u8]| -> Result<std::collections::BTreeSet<(u8, usize)>> {
-        let mut cells = std::collections::BTreeSet::new();
-        for (index, epoch) in record::parse_container(System::Bds, container)?
-            .iter()
-            .enumerate()
-        {
-            for bytes in &epoch.blocks[0] {
-                let values = record::decode(System::Bds, bytes)?;
-                if orbit::is_geo(System::Bds, &orbit::parameters(&values)?) {
-                    record::validate(System::Bds, &values)?;
-                    record::validate_envelope(System::Bds, &values)?;
-                    cells.insert((values["sv"] as u8 + 1, index));
+    for system in systems {
+        let name = format!("HW_PGNSS_{}", system.name());
+        let ours = kepler_cells(system, &products.files[&name])?;
+        let huawei = kepler_cells(system, &fs::read(root.join("oracle").join(&name))?)?;
+        for (cell, values) in &ours {
+            let expected = huawei
+                .get(cell)
+                .map_or(Vec::new(), |v| record::fields_on_limit(system, v));
+            assert_eq!(
+                record::fields_on_limit(system, values),
+                expected,
+                "{system:?} {cell:?}"
+            );
+        }
+        let keys = |cells: &Cells, only_geo: bool| -> Vec<(u8, usize)> {
+            cells
+                .iter()
+                .filter(|(_, v)| !only_geo || geo(v))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        match system {
+            System::Gps => {
+                let mut compared = 0;
+                for (cell, values) in &ours {
+                    if let Some(theirs) = huawei.get(cell) {
+                        let separation = largest_separation(system, values, theirs)?;
+                        assert!(
+                            separation <= 0.15,
+                            "G{:02} e{}: {separation:.3} m",
+                            cell.0,
+                            cell.1
+                        );
+                        compared += 1;
+                    }
                 }
+                assert!(compared >= 1000, "{compared}");
+            }
+            System::Bds => {
+                assert_eq!(keys(&huawei, true).len(), 139);
+                assert_eq!(keys(&ours, true), keys(&huawei, true));
+            }
+            _ => {
+                assert_eq!(huawei.len(), 47);
+                assert_eq!(keys(&ours, false), keys(&huawei, false));
             }
         }
-        Ok(cells)
-    };
-    let shipped = geo_cells(&products.files["HW_PGNSS_BDS"])?;
-    let huawei = geo_cells(&fs::read(root.join("oracle/HW_PGNSS_BDS"))?)?;
-    assert_eq!(huawei.len(), 139);
-    let missing: Vec<_> = huawei.difference(&shipped).collect();
-    let extra: Vec<_> = shipped.difference(&huawei).collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "GEO records missing: {missing:?}, extra: {extra:?}"
-    );
+    }
     Ok(())
 }
 
