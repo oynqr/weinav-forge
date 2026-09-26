@@ -325,7 +325,7 @@ pub struct EpochReport {
     pub source_hashes: Vec<String>,
     pub counts: Vec<usize>,
     pub fit_sigma_max_m: f64,
-    pub quantized_rms_max_m: f64,
+    pub quantized_sigma_max_m: f64,
     pub clock_alignment_ns: Option<f64>,
     pub removals: Vec<String>,
 }
@@ -429,10 +429,10 @@ fn kepler(
             .map(|i| (xyz[i] - state.position[i]).powi(2))
             .sum::<f64>();
     }
-    let quantized = (residual / samples.len() as f64).sqrt();
+    let quantized = (residual / (3 * samples.len() - 15) as f64).sqrt();
     ensure!(
         quantized <= fit_limit + 0.5,
-        "quantized RMS {quantized:.3} m exceeds limit plus 0.5 m"
+        "quantized sigma {quantized:.3} m exceeds limit plus 0.5 m"
     );
     Ok((bytes, fit.sigma, quantized))
 }
@@ -620,7 +620,7 @@ pub fn assemble(
                     source_hashes: hashes,
                     counts: Vec::new(),
                     fit_sigma_max_m: 0.0,
-                    quantized_rms_max_m: 0.0,
+                    quantized_sigma_max_m: 0.0,
                     clock_alignment_ns: None,
                     removals: Vec::new(),
                 };
@@ -687,8 +687,8 @@ pub fn assemble(
                             Ok((bytes, sigma, quantized)) => {
                                 records.push(bytes);
                                 report.fit_sigma_max_m = report.fit_sigma_max_m.max(sigma);
-                                report.quantized_rms_max_m =
-                                    report.quantized_rms_max_m.max(quantized);
+                                report.quantized_sigma_max_m =
+                                    report.quantized_sigma_max_m.max(quantized);
                             }
                             Err(e) => report.removals.push(format!("{id} block {block}: {e:#}")),
                         }

@@ -136,7 +136,7 @@ mod tests {
             source_hashes: vec![],
             counts: vec![],
             fit_sigma_max_m: 0.0,
-            quantized_rms_max_m: 0.0,
+            quantized_sigma_max_m: 0.0,
             clock_alignment_ns: None,
             removals: vec![],
         }

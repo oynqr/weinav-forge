@@ -212,7 +212,8 @@ are each written through a temporary file.
 The processor checks the data format, satellite counts, time coverage and
 source policy before packing. ANTEX corrections use the satellite's radial
 phase-centre offset; transverse antenna offsets are not modelled. The
-quantised orbit check permits 0.5 metre beyond the configured fit limit.
+quantised orbit check computes the fit's standard error again from the
+encoded record, and permits 0.5 metre beyond the configured fit limit.
 Nearly circular orbits use numerical derivatives because the analytic
 coordinate conversion divides by eccentricity. Without a seed, the validity
 window of the partial EXTRA file starts at the 2-hour grid step that contains
