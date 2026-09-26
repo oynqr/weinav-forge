@@ -233,6 +233,10 @@ seed. The builder removes the median offset against the seed in each epoch, or
 against broadcast when there is no seed, and reports it as
 ``clock_alignment_ns``.
 
+The measured field envelopes in ``src/envelopes.rs`` are the ``env_min`` and
+``env_max`` limits of the external gate's ``g2_envelopes.json``, multiplied by
+the field scale. Update them together when the gate's corpus changes.
+
 Seed arcs with the flag set are not used. A Kepler record is removed when one
 of its fit samples falls in such an arc, and a GLONASS record when its time
 does. Each satellite's orbit is compared with broadcast at the build time,
