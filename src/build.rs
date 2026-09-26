@@ -520,7 +520,9 @@ pub fn assemble(
         let bytes = if matches!(flavor, Flavor::Huawei | Flavor::HuaweiPlus) {
             crate::seed::decompress(&inputs.raw[&Role::Agnss][0])?.into_owned()
         } else {
-            crate::agnss::build(&inputs.broadcast, systems, at)?
+            let (bytes, notes) = crate::agnss::build(&inputs.broadcast, systems, at)?;
+            product.notes.extend(notes);
+            bytes
         };
         crate::agnss::validate_fresh(&bytes, at)?;
         product.files.insert("HW_AGNSS_RTCM_33".into(), bytes);

@@ -142,10 +142,11 @@ pub fn from_navigation(nav: &Navigation) -> Result<Message> {
 }
 
 pub fn ionosphere(broadcast: &Broadcast) -> Option<Message> {
+    let klobuchar = broadcast.klobuchar?;
     let mut values = BTreeMap::from([("tag".into(), 6.0)]);
-    for (prefix, key) in [("alpha", "GPSA"), ("beta", "GPSB")] {
-        for (i, value) in broadcast.ionosphere.get(key)?.iter().enumerate() {
-            values.insert(format!("{prefix}{i}"), *value);
+    for (prefix, coefficients) in [("alpha", klobuchar.alpha), ("beta", klobuchar.beta)] {
+        for (i, value) in coefficients.into_iter().enumerate() {
+            values.insert(format!("{prefix}{i}"), value);
         }
     }
     Some(Message {
@@ -154,32 +155,46 @@ pub fn ionosphere(broadcast: &Broadcast) -> Option<Message> {
     })
 }
 
-pub fn build(broadcast: &Broadcast, systems: &[System], at: Instant) -> Result<Vec<u8>> {
+pub fn build(
+    broadcast: &Broadcast,
+    systems: &[System],
+    at: Instant,
+) -> Result<(Vec<u8>, Vec<String>)> {
     let mut out = Vec::new();
-    for &system in systems {
-        if system == System::Qzs {
+    let mut notes = Vec::new();
+    let now = at.gps() as f64;
+    for system in [System::Gps, System::Glonass, System::Bds, System::Galileo] {
+        if !systems.contains(&system) {
             continue;
         }
-        let mut count = 0;
+        let mut ages = Vec::new();
         for id in 1..=system.slots() as u8 {
-            if let Some(nav) = broadcast
-                .nearest(system, id, at.gps() as f64)
-                .filter(|n| n.healthy())
-            {
+            if let Some(nav) = broadcast.nearest(system, id, now).filter(|n| n.healthy()) {
                 out.extend(rtcm::frame(&from_navigation(nav)?.encode()?)?);
-                count += 1;
+                ages.push(now - nav.epoch);
             }
         }
         ensure!(
-            count > 0,
+            !ages.is_empty(),
             "no fresh healthy {} broadcast ephemerides",
             system.name()
         );
+        if system == System::Glonass {
+            let (newest, oldest) = ages
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &age| {
+                    (low.min(age), high.max(age))
+                });
+            notes.push(format!(
+                "AGNSS: GLONASS t_b age at build is {newest:.0} s to {oldest:.0} s"
+            ));
+        }
     }
-    if let Some(message) = ionosphere(broadcast) {
-        out.extend(rtcm::frame(&message.encode()?)?);
+    match ionosphere(broadcast) {
+        Some(message) => out.extend(rtcm::frame(&message.encode()?)?),
+        None => notes.push("AGNSS: GPS ionosphere coefficients are absent".into()),
     }
-    Ok(out)
+    Ok((out, notes))
 }
 
 pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {

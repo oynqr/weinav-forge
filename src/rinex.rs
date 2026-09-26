@@ -74,7 +74,14 @@ impl Values {
 #[derive(Default)]
 pub struct Broadcast {
     pub records: BTreeMap<(System, u8), Vec<Navigation>>,
-    pub ionosphere: BTreeMap<String, [f64; 4]>,
+    pub klobuchar: Option<Klobuchar>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Klobuchar {
+    pub time: f64,
+    pub alpha: [f64; 4],
+    pub beta: [f64; 4],
 }
 
 pub fn number(text: &str) -> Result<f64> {
@@ -107,6 +114,37 @@ pub fn calendar(parts: &[&str]) -> Result<chrono::DateTime<Utc>> {
     Ok(date + chrono::Duration::nanoseconds((seconds.fract() * 1e9).round() as i64))
 }
 
+fn klobuchar_record(block: &[&str]) -> Result<Klobuchar> {
+    let date = calendar(
+        &block[0]
+            .get(4..23)
+            .context("short RINEX ionosphere epoch")?
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+    )?;
+    let field = |line: &str, i: usize| {
+        number(
+            line.get(4 + i * 19..23 + i * 19)
+                .context("short RINEX ionosphere coefficient")?,
+        )
+    };
+    Ok(Klobuchar {
+        time: (date.timestamp() - GPS_EPOCH_UNIX) as f64,
+        alpha: [
+            field(block[0], 1)?,
+            field(block[0], 2)?,
+            field(block[0], 3)?,
+            field(block[1], 0)?,
+        ],
+        beta: [
+            field(block[1], 1)?,
+            field(block[1], 2)?,
+            field(block[1], 3)?,
+            field(block[2], 0)?,
+        ],
+    })
+}
+
 impl Broadcast {
     pub fn add(&mut self, input: &[u8]) -> Result<()> {
         let bytes = decompress(input)?;
@@ -123,6 +161,7 @@ impl Broadcast {
             .iter()
             .position(|l| l.get(60..).unwrap_or("").trim() == "END OF HEADER")
             .context("missing RINEX header terminator")?;
+        let (mut header_alpha, mut header_beta) = (None, None);
         for line in &lines[..end] {
             if line.get(60..).unwrap_or("").trim() == "IONOSPHERIC CORR" {
                 let key = line.get(..4).context("short ionosphere header")?.trim();
@@ -133,16 +172,33 @@ impl Broadcast {
                             .context("short ionosphere coefficient")?,
                     )?;
                 }
-                self.ionosphere.insert(key.into(), values);
+                match key {
+                    "GPSA" => header_alpha = Some(values),
+                    "GPSB" => header_beta = Some(values),
+                    _ => {}
+                }
             }
         }
         let mut index = end + 1;
         let mut wanted = true;
         let mut parsed = 0;
+        let mut first_epoch = f64::INFINITY;
         while index < lines.len() {
             let line = lines[index];
             if let Some(header) = line.strip_prefix('>') {
                 let parts: Vec<_> = header.split_whitespace().collect();
+                if parts.first() == Some(&"ION")
+                    && parts.get(1).is_some_and(|id| id.starts_with('G'))
+                    && parts.get(2) == Some(&"LNAV")
+                {
+                    let block = lines
+                        .get(index + 1..index + 4)
+                        .context("truncated RINEX ionosphere record")?;
+                    self.update_klobuchar(klobuchar_record(block)?);
+                    wanted = false;
+                    index += 4;
+                    continue;
+                }
                 wanted = parts.first() == Some(&"EPH")
                     && parts.get(2).is_some_and(|t| {
                         matches!(*t, "LNAV" | "FDMA" | "INAV" | "FNAV" | "D1" | "D2")
@@ -219,6 +275,7 @@ impl Broadcast {
                 system_epoch,
                 values,
             };
+            first_epoch = first_epoch.min(epoch);
             let records = self.records.entry((system, svid)).or_default();
             if let Some(old) = records.iter_mut().find(|old| {
                 old.epoch == epoch
@@ -231,10 +288,26 @@ impl Broadcast {
             parsed += 1;
         }
         ensure!(parsed > 0, "RINEX has no supported navigation records");
+        if let (Some(alpha), Some(beta)) = (header_alpha, header_beta) {
+            self.update_klobuchar(Klobuchar {
+                time: first_epoch,
+                alpha,
+                beta,
+            });
+        }
         for records in self.records.values_mut() {
             records.sort_by(|a, b| a.epoch.total_cmp(&b.epoch));
         }
         Ok(())
+    }
+
+    fn update_klobuchar(&mut self, candidate: Klobuchar) {
+        if self
+            .klobuchar
+            .is_none_or(|current| candidate.time >= current.time)
+        {
+            self.klobuchar = Some(candidate);
+        }
     }
 
     pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
@@ -419,6 +492,54 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected);
         }
+    }
+
+    fn navigation(version: &str, header: &str, body: &str, hour: u32) -> Vec<u8> {
+        let mut text = format!(
+            "{version:>9}{:51}RINEX VERSION / TYPE\n{header}{:60}END OF HEADER\n{body}",
+            "", ""
+        );
+        if version.starts_with('4') {
+            text.push_str("> EPH G01 LNAV\n");
+        }
+        text.push_str(&format!(
+            "G01 2026 09 26 {hour:02} 00 00{:19.12E}{:19.12E}{:19.12E}\n",
+            0.0, 0.0, 0.0
+        ));
+        for _ in 0..7 {
+            text.push_str(&format!(
+                "    {:19.12E}{:19.12E}{:19.12E}{:19.12E}\n",
+                1.0, 1.0, 1.0, 1.0
+            ));
+        }
+        text.into_bytes()
+    }
+
+    #[test]
+    fn klobuchar_comes_from_the_newest_header_or_rinex_4_record() -> Result<()> {
+        let alpha = [1.8626e-8, 1.4901e-8, -1.1921e-7, -1.1921e-7];
+        let beta = [1.1469e8, 1.6384e4, -2.6214e5, 6.5536e4];
+        let record = format!(
+            "> ION G10 LNAV\n    2026 09 26 04 00 00{:19.12E}{:19.12E}{:19.12E}\n    {:19.12E}{:19.12E}{:19.12E}{:19.12E}\n    {:19.12E}{:19.12E}\n",
+            alpha[0], alpha[1], alpha[2], alpha[3], beta[0], beta[1], beta[2], beta[3], 0.0
+        );
+        let header = format!(
+            "GPSA {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\nGPSB {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\n",
+            1e-8, 0.0, 0.0, 0.0, "", 9e4, 0.0, 0.0, 0.0, ""
+        );
+        let mut broadcast = Broadcast::default();
+        broadcast.add(&navigation("4.01", "", &record, 4))?;
+        let rinex_4 = broadcast.klobuchar.context("RINEX 4 ionosphere missing")?;
+        assert_eq!(rinex_4.alpha, alpha);
+        assert_eq!(rinex_4.beta, beta);
+        broadcast.add(&navigation("3.05", &header, "", 0))?;
+        assert_eq!(broadcast.klobuchar, Some(rinex_4));
+        broadcast.add(&navigation("3.05", &header, "", 6))?;
+        let newer = broadcast.klobuchar.context("header ionosphere missing")?;
+        assert_eq!(newer.alpha, [1e-8, 0.0, 0.0, 0.0]);
+        assert_eq!(newer.beta, [9e4, 0.0, 0.0, 0.0]);
+        assert!(newer.time > rinex_4.time);
+        Ok(())
     }
 
     #[test]
