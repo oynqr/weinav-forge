@@ -1,54 +1,40 @@
 version: 2
 
-updates:
-  - package-ecosystem: cargo
-    directory: /
+multi-ecosystem-groups:
+  dependencies:
     schedule:
       interval: weekly
       day: monday
       time: "03:27"
       timezone: Etc/UTC
+    commit-message:
+      prefix: chore
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    multi-ecosystem-group: dependencies
+    patterns:
+      - "*"
     versioning-strategy: lockfile-only
     allow:
       - dependency-type: all
     cooldown:
       default-days: 2
     groups:
-      cargo:
-        applies-to: version-updates
-        patterns:
-          - "*"
       cargo-security:
         applies-to: security-updates
         patterns:
           - "*"
-    commit-message:
-      prefix: chore
 
   - package-ecosystem: nix
     directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "04:27"
-      timezone: Etc/UTC
-    groups:
-      nix:
-        patterns:
-          - "*"
-    commit-message:
-      prefix: chore
+    multi-ecosystem-group: dependencies
+    patterns:
+      - "*"
 
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "05:27"
-      timezone: Etc/UTC
-    groups:
-      github-actions:
-        patterns:
-          - "*"
-    commit-message:
-      prefix: chore
+    multi-ecosystem-group: dependencies
+    patterns:
+      - "*"
