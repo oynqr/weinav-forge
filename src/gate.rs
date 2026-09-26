@@ -391,7 +391,9 @@ pub fn inspect(
         let result = files
             .get("HW_AGNSS_RTCM_33")
             .ok_or_else(|| anyhow::anyhow!("missing RTCM"))
-            .and_then(|b| crate::agnss::validate_fresh(b, at));
+            .and_then(|b| {
+                crate::agnss::validate_fresh(b, at, plan.products["HW_AGNSS_RTCM_33"].orbit != "hw")
+            });
         gate.check(
             "K4",
             "HW_AGNSS_RTCM_33",

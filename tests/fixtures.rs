@@ -190,6 +190,31 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed Huawei AGNSS"]
+fn reviewed_huawei_agnss_is_not_refused_for_its_galileo_week() -> Result<()> {
+    use weinav_forge::{agnss, time::Instant};
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let bytes =
+        fs::read(root.join("x/huawei/659dea01-0fbb-41e4-8876-e5eb5eeecc95/HW_AGNSS_RTCM_33"))?;
+    let at = Instant::parse("2026-09-26T05:43:07Z")?;
+    agnss::validate_fresh(&bytes, at, true)?;
+    let mut shifted = Vec::new();
+    for payload in rtcm::payloads(&bytes)? {
+        let mut message = rtcm::Message::decode(payload)?;
+        if message.number == 1046 {
+            *message.values.get_mut("week").context("Galileo week")? += 1.0;
+        }
+        shifted.extend(rtcm::frame(&message.encode()?)?);
+    }
+    agnss::validate_fresh(&shifted, at, false)?;
+    assert!(agnss::validate_fresh(&shifted, at, true).is_err());
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires the author's reviewed seed and broadcast snapshot"]
 fn reviewed_flagged_arc_at_build_time_removes_only_nearby_records() -> Result<()> {
     use weinav_forge::{
@@ -260,10 +285,10 @@ fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
     )?)?;
     let at = Instant::parse("2026-09-26T05:43:07Z")?;
     let (bytes, _) = agnss::build(&broadcast, &System::ALL, at)?;
-    agnss::validate_fresh(&bytes, at)?;
-    agnss::validate_fresh(&bytes, Instant::parse("2026-09-26T06:14:00Z")?)?;
+    agnss::validate_fresh(&bytes, at, true)?;
+    agnss::validate_fresh(&bytes, Instant::parse("2026-09-26T06:14:00Z")?, true)?;
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
-    let error = agnss::validate_fresh(&bytes, late).unwrap_err();
+    let error = agnss::validate_fresh(&bytes, late, true).unwrap_err();
     assert!(error.to_string().contains("1020"), "{error:#}");
     Ok(())
 }

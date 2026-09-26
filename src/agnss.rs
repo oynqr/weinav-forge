@@ -197,7 +197,7 @@ pub fn build(
     Ok((out, notes))
 }
 
-pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {
+pub fn validate_fresh(bytes: &[u8], at: Instant, galileo_week: bool) -> Result<()> {
     for payload in rtcm::payloads(bytes)? {
         let m = Message::decode(payload)?;
         let now = at.gps() as f64;
@@ -226,7 +226,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {
             _ => 7200.0,
         };
         ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
-        if m.number == 1019 || m.number == 1046 || m.number == 1042 {
+        if m.number == 1019 || (m.number == 1046 && galileo_week) || m.number == 1042 {
             let (offset, modulus) = match m.number {
                 1019 => (0.0, 1024.0),
                 1046 => (1024.0, 4096.0),

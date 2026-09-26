@@ -543,7 +543,7 @@ pub fn assemble(
             product.notes.extend(notes);
             bytes
         };
-        crate::agnss::validate_fresh(&bytes, at)?;
+        crate::agnss::validate_fresh(&bytes, at, plan.products["HW_AGNSS_RTCM_33"].orbit != "hw")?;
         product.files.insert("HW_AGNSS_RTCM_33".into(), bytes);
     }
     for &system in systems {

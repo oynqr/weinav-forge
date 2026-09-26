@@ -246,9 +246,12 @@ screening, AGNSS and Klobuchar data use all broadcast files. The newest
 Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
 time, a BeiDou ``toe`` more than 90 minutes away, and a GPS or Galileo ``toe``
-more than 2 hours away, as the external gate does. Each build fetches the
-broadcast files again. The fetcher reuses a cached URL for at most 2 minutes,
-so a snapshot never carries over to the next regeneration.
+more than 2 hours away, as the external gate does. For Huawei's AGNSS, only the
+Galileo time of week is checked, not the week number: on 26 September 2026
+Huawei's stream carried the next Galileo week. The external gate does not read
+that week. Each build fetches the broadcast files again. The fetcher reuses a
+cached URL for at most 2 minutes, so a snapshot never carries over to the next
+regeneration.
 
 The report uses the ``gb-gnss-zipbuilder/report/1`` format. The gate reads
 the ``format``, ``flavor``, ``built_at_unix``, ``seed``, ``health``,
