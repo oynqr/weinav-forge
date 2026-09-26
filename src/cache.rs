@@ -30,6 +30,8 @@ pub struct Source {
     pub last_modified: Option<String>,
     #[serde(default)]
     pub coverage: Vec<Coverage>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -23,6 +23,7 @@ pub struct Inputs {
     pub satellites: BTreeMap<System, BTreeMap<u8, Satellite>>,
     pub acceleration: Option<Acceleration>,
     pub broadcast: Broadcast,
+    pub health: Broadcast,
     pub predictions: BTreeMap<Role, Sp3>,
     pub antex: Option<Antex>,
     pub raw: BTreeMap<Role, Vec<Vec<u8>>>,
@@ -91,6 +92,7 @@ impl Inputs {
                     etag: None,
                     last_modified: None,
                     coverage: crate::fetch::inspect(role, &bytes)?,
+                    version: None,
                 });
                 inputs.add_source(role, bytes)?;
             }
@@ -122,7 +124,12 @@ impl Inputs {
                 ensure!(self.seed.is_none(), "supply one seed");
                 self.seed = Some(Seed::parse(&bytes)?);
             }
-            Role::Broadcast => self.broadcast.add(&bytes)?,
+            Role::Broadcast => {
+                self.broadcast.add(&bytes)?;
+                let mut health = Broadcast::default();
+                health.add(&bytes)?;
+                self.health = health;
+            }
             Role::Prediction | Role::BdsPrediction | Role::QzsPrediction => {
                 self.predictions.entry(role).or_default().add(&bytes)?;
             }
@@ -214,15 +221,31 @@ impl Inputs {
         }
     }
 
+    pub fn health_source(&self) -> Option<&Source> {
+        self.sources
+            .iter()
+            .rev()
+            .find(|source| source.role == Role::Broadcast)
+    }
+
+    fn screen_health(&self, system: System, id: u8, at: Instant) -> Result<()> {
+        let nav = self
+            .health
+            .newest(system, id, at.gps() as f64)
+            .context("absent from the fresh broadcast snapshot")?;
+        ensure!(
+            nav.healthy(),
+            "unhealthy in the broadcast snapshot record of {}",
+            Instant::from_gps(nav.epoch as i64)?.0.to_rfc3339()
+        );
+        Ok(())
+    }
+
     fn covers(&self, system: System, provider: &str, start: f64, end: f64, at: Instant) -> bool {
         let ids: Vec<_> = self
             .ids(system, provider)
             .into_iter()
-            .filter(|&id| {
-                self.broadcast
-                    .nearest(system, id, at.gps() as f64)
-                    .is_some_and(|n| n.healthy())
-            })
+            .filter(|&id| self.screen_health(system, id, at).is_ok())
             .collect();
         !ids.is_empty()
             && ids.into_iter().all(|id| {
@@ -602,12 +625,12 @@ pub fn assemble(
                 let mut screened_ids = BTreeSet::new();
                 for id in inputs.ids(system, orbit) {
                     let screen = (|| -> Result<()> {
-                        let nav = inputs
+                        inputs.screen_health(system, id, at)?;
+                        let reference = inputs
                             .broadcast
                             .nearest(system, id, at.gps() as f64)
-                            .context("absent from fresh broadcast")?;
-                        ensure!(nav.healthy(), "broadcast satellite unhealthy");
-                        let reference = nav.state(at.gps() as f64)?;
+                            .context("absent from fresh broadcast")?
+                            .state(at.gps() as f64)?;
                         let candidate = inputs.state(system, id, at.gps() as f64, orbit)?;
                         let distance = (0..3)
                             .map(|i| (reference.position[i] - candidate.position[i]).powi(2))

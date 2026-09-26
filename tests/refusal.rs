@@ -78,6 +78,7 @@ fn empty_inputs() -> Inputs {
         satellites: BTreeMap::new(),
         acceleration: None,
         broadcast: Broadcast::default(),
+        health: Broadcast::default(),
         predictions: BTreeMap::new(),
         antex: None,
         raw: BTreeMap::new(),

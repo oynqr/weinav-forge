@@ -13,6 +13,7 @@ use std::{
 use weinav_forge::{
     build, cache, fetch, gate, pack,
     policy::{Flavor, Plan, Role, System},
+    report,
     time::Instant,
 };
 
@@ -278,7 +279,7 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Source unavailable: {e:#}");
@@ -299,7 +300,7 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Output refused: {e:#}");
@@ -357,7 +358,17 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
         .iter()
         .map(|(n, b)| (n, cache::hash(b)))
         .collect();
-    let report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"plan":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
+    let mut report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
+    report
+        .as_object_mut()
+        .context("report is not a JSON object")?
+        .extend(report::gate_fields(
+            &inputs,
+            &products,
+            &Plan::new(flavor, &common.systems, !common.no_agnss),
+            at,
+            options.allow_degraded,
+        ));
     cache::atomic_write(&report_path, &serde_json::to_vec_pretty(&report)?)?;
     if accepted {
         cache::atomic_write(&zip_path, &packed.unwrap())?;

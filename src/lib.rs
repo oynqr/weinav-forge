@@ -11,6 +11,7 @@ pub mod orbit;
 pub mod pack;
 pub mod policy;
 pub mod record;
+pub mod report;
 pub mod rinex;
 pub mod rtcm;
 pub mod seed;

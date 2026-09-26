@@ -73,6 +73,7 @@ fn cached_sources_keep_validation_and_local_overrides() -> Result<()> {
             etag: None,
             last_modified: None,
             coverage: fetch::inspect(role, &bytes)?,
+            version: None,
         };
         cache::store_source(root, &source, &bytes)?;
         manifest.sources.push(source);

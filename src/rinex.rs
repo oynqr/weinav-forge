@@ -310,18 +310,28 @@ impl Broadcast {
         }
     }
 
-    pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+    fn fresh(&self, system: System, svid: u8, time: f64) -> impl Iterator<Item = &Navigation> {
         self.records
-            .get(&(system, svid))?
-            .iter()
-            .filter(|r| {
+            .get(&(system, svid))
+            .into_iter()
+            .flatten()
+            .filter(move |r| {
                 (r.epoch - time).abs() <= 7200.0
                     && (system != System::Galileo
                         || r.values
                             .get("data_sources")
                             .is_some_and(|v| (*v as u32) & 2 != 0))
             })
+    }
+
+    pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.fresh(system, svid, time)
             .min_by(|a, b| (a.epoch - time).abs().total_cmp(&(b.epoch - time).abs()))
+    }
+
+    pub fn newest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.fresh(system, svid, time)
+            .max_by(|a, b| a.epoch.total_cmp(&b.epoch))
     }
 }
 
@@ -513,6 +523,23 @@ mod tests {
             ));
         }
         text.into_bytes()
+    }
+
+    #[test]
+    fn newest_prefers_the_latest_fresh_record_over_the_nearest() -> Result<()> {
+        let mut broadcast = Broadcast::default();
+        for hour in [5, 6, 9] {
+            broadcast.add(&navigation("3.05", "", "", hour))?;
+        }
+        let at = (Utc
+            .with_ymd_and_hms(2026, 9, 26, 5, 20, 0)
+            .unwrap()
+            .timestamp()
+            - GPS_EPOCH_UNIX) as f64;
+        let epoch = |nav: Option<&Navigation>| nav.map(|n| n.epoch - at);
+        assert_eq!(epoch(broadcast.nearest(System::Gps, 1, at)), Some(-1200.0));
+        assert_eq!(epoch(broadcast.newest(System::Gps, 1, at)), Some(2400.0));
+        Ok(())
     }
 
     #[test]

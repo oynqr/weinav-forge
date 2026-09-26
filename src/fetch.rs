@@ -203,6 +203,7 @@ impl<'a> Fetcher<'a> {
                         etag,
                         last_modified,
                         coverage,
+                        version: None,
                     };
                     cache::store_source(self.root, &source, &bytes)?;
                     cache::atomic_write(&metadata, &serde_json::to_vec_pretty(&source)?)?;
@@ -266,6 +267,7 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                     etag: None,
                     last_modified: None,
                     coverage: inspect(role, &bytes)?,
+                    version: None,
                 };
                 cache::store_source(options.cache, &source, &bytes)?;
                 sources.push(source);
@@ -306,7 +308,13 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         Url::parse(url)?.scheme() == "https",
                         "seed download must use HTTPS"
                     );
-                    sources.push(fetcher.get(url, role, "hiee", true)?.0);
+                    let mut source = fetcher.get(url, role, "hiee", true)?.0;
+                    source.version = match &entry["ver"] {
+                        serde_json::Value::String(version) => Some(version.clone()),
+                        serde_json::Value::Number(version) => Some(version.to_string()),
+                        _ => None,
+                    };
+                    sources.push(source);
                 }
                 Role::QzsPrediction => {
                     let (_, bytes) = fetcher.get(
