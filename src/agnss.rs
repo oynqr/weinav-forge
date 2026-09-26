@@ -155,6 +155,14 @@ pub fn ionosphere(broadcast: &Broadcast) -> Option<Message> {
     })
 }
 
+fn age_limit(number: u16) -> f64 {
+    match number {
+        1020 => 1800.0,
+        1042 => 5400.0,
+        _ => 7200.0,
+    }
+}
+
 pub fn build(
     broadcast: &Broadcast,
     systems: &[System],
@@ -168,10 +176,24 @@ pub fn build(
             continue;
         }
         let mut ages = Vec::new();
+        let mut stale = 0;
         for id in 1..=system.slots() as u8 {
             if let Some(nav) = broadcast.nearest(system, id, now).filter(|n| n.healthy()) {
+                let age = now - nav.epoch;
+                if system == System::Glonass && age.abs() > age_limit(1020) {
+                    stale += 1;
+                    continue;
+                }
                 out.extend(rtcm::frame(&from_navigation(nav)?.encode()?)?);
-                ages.push(now - nav.epoch);
+                ages.push(age);
+            }
+        }
+        if stale > 0 {
+            notes.push(format!(
+                "AGNSS: {stale} GLONASS ephemerides with t_b more than 30 min from the build are omitted"
+            ));
+            if ages.is_empty() {
+                continue;
             }
         }
         ensure!(
@@ -220,11 +242,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, galileo_week: bool) -> Result<(
             }
             _ => continue,
         };
-        let limit = match m.number {
-            1020 => 1800.0,
-            1042 => 5400.0,
-            _ => 7200.0,
-        };
+        let limit = age_limit(m.number);
         ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
         if m.number == 1019 || (m.number == 1046 && galileo_week) || m.number == 1042 {
             let (offset, modulus) = match m.number {

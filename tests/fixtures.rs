@@ -294,6 +294,43 @@ fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed broadcast snapshot"]
+fn reviewed_open_agnss_omits_only_stale_glonass() -> Result<()> {
+    use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let mut broadcast = Broadcast::default();
+    broadcast.add(&fs::read(
+        root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz"),
+    )?)?;
+    let count = |bytes: &[u8], number: u16| -> Result<usize> {
+        let mut count = 0;
+        for payload in rtcm::payloads(bytes)? {
+            count += usize::from(rtcm::Message::decode(payload)?.number == number);
+        }
+        Ok(count)
+    };
+    let fresh = Instant::parse("2026-09-26T06:14:00Z")?;
+    let (bytes, notes) = agnss::build(&broadcast, &System::ALL, fresh)?;
+    assert!(count(&bytes, 1020)? > 0);
+    assert!(!notes.iter().any(|n| n.contains("omitted")), "{notes:?}");
+    let late = Instant::parse("2026-09-26T06:16:00Z")?;
+    let (bytes, notes) = agnss::build(&broadcast, &System::ALL, late)?;
+    agnss::validate_fresh(&bytes, late, true)?;
+    assert_eq!(count(&bytes, 1020)?, 0);
+    assert!(count(&bytes, 1019)? > 0 && count(&bytes, 1042)? > 0 && count(&bytes, 1046)? > 0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("GLONASS") && n.contains("omitted")),
+        "{notes:?}"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires local Huawei fixtures"]
 fn seed_and_extra_match_captured_bytes() -> Result<()> {
     let seed = Seed::parse(&fixture("HiEE_V2.expired-20260909.dat.gz")?)?;
