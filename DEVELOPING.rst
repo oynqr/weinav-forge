@@ -263,6 +263,9 @@ gate can repeat each decision from the published file. The processor writes
 a copy of this file next to the report only when the checks pass. Orbit
 screening, AGNSS and Klobuchar data use all broadcast files. The newest
 Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
+Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
+Klobuchar coefficients. The fetcher therefore also gets that file for the
+build day, or for the day before, when it is available.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
 time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
 2 hours away, in absolute time, as the external gate does. It also refuses a

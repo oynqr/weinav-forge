@@ -386,6 +386,10 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         let candidates=[("IGS","S"),("MGEX","S"),("IGS","R"),("EUREF","R")].map(|(pool,kind)|("brdc".into(),format!("https://igs.bkg.bund.de/root_ftp/{pool}/BRDC/{}/{:03}/BRDC00WRD_{kind}_{stamp}0000_01D_MN.rnx.gz",day.year(),day.ordinal())));
                         sources.push(fetcher.chain(role, &candidates)?);
                     }
+                    let klobuchar = [options.at.0, options.at.0 - chrono::Duration::days(1)].map(|day| ("brdc".into(), format!("https://igs.bkg.bund.de/root_ftp/EUREF/BRDC/{}/{:03}/BRDC00WRD_R_{}0000_01D_MN.rnx.gz", day.year(), day.ordinal(), day.format("%Y%j"))));
+                    if let Ok(source) = fetcher.chain(role, &klobuchar) {
+                        sources.push(source);
+                    }
                     sources.push(
                         fetcher
                             .get(
