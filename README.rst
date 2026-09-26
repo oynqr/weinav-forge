@@ -20,37 +20,46 @@ Use Nix to build the Linux executable:
 
 The flake supports ``x86_64-linux`` and ``aarch64-linux``.
 
-Source policy
--------------
+Choose a flavor
+---------------
 
-Select a flavor for each build. Use ``--plan`` to see its source policy
-without reading or downloading source files:
+Assistance data helps a watch find satellites and calculate its position.
+A flavor selects the sources for this data. Public sources provide data
+without using Huawei's download services.
+
+``huawei``
+  Build the assistance files from Huawei data. Use public data only to
+  check that the satellites are usable.
+
+``huawei-plus``
+  Combine Huawei data with satellite position predictions from public
+  sources. Keep Huawei's data for finding satellites when the watch starts.
+
+``open-plus``
+  Use public data for finding satellites and predicting their positions.
+  Use Huawei data for some additional information and to fill gaps in the
+  predictions. This flavor still needs Huawei data.
+
+``open``
+  Use public sources only, with no Huawei data. The files lack approximate
+  position lists for BeiDou and GLONASS, plus some time and satellite status
+  data. BeiDou and QZSS predictions can cover less than three days.
+
+  The watch can take longer to find its first position, especially with
+  weak signals, because it may need more data directly from satellites.
+  These gaps do not disable the affected satellite systems.
+  Use ``process --allow-degraded`` to permit these gaps.
+
+Each flavor must pass checks before the tool writes a ZIP file. A build can
+fail if its sources have too few usable satellites. Read ``report.json`` for
+the results.
+
+Use ``--plan`` to see the detailed source policy without reading or
+downloading source files:
 
 .. code-block:: bash
 
   weinav-forge fetch --flavor huawei-plus --plan
-
-``huawei``
-  Use Huawei seed orbits, clocks and EXTRA data. Keep Huawei AGNSS bytes.
-
-``huawei-plus``
-  Use open GPS, Galileo and GLONASS orbits. Keep the Huawei GLONASS clock,
-  QZSS data, EXTRA data and AGNSS bytes. Use open BeiDou predictions until
-  their coverage ends, then use the seed.
-
-``open-plus``
-  Use open orbits and clocks. Use the seed for EXTRA and for whole BeiDou
-  and QZSS epochs beyond the open prediction coverage. Build AGNSS from
-  broadcast navigation data.
-
-``open``
-  Use open sources only. BeiDou and QZSS epochs beyond prediction coverage
-  are empty. EXTRA has open GPS and Galileo almanacs, GPS ionosphere data,
-  and GLONASS frequency data. Other EXTRA regions are absent. This flavor
-  requires ``process --allow-degraded``.
-
-The report lists source files, data coverage and check results. A flavor can
-fail its checks when current sources have too few usable satellites.
 
 Fetch and process
 -----------------
