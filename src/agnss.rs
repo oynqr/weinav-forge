@@ -219,7 +219,7 @@ pub fn build(
     Ok((out, notes))
 }
 
-pub fn validate_fresh(bytes: &[u8], at: Instant, galileo_week: bool) -> Result<()> {
+pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result<()> {
     for payload in rtcm::payloads(bytes)? {
         let m = Message::decode(payload)?;
         let now = at.gps() as f64;
@@ -244,7 +244,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, galileo_week: bool) -> Result<(
         };
         let limit = age_limit(m.number);
         ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
-        if m.number == 1019 || (m.number == 1046 && galileo_week) || m.number == 1042 {
+        if m.number == 1019 || (m.number == 1046 && absolute_dates) || m.number == 1042 {
             let (offset, modulus) = match m.number {
                 1019 => (0.0, 1024.0),
                 1046 => (1024.0, 4096.0),
@@ -261,7 +261,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, galileo_week: bool) -> Result<(
                     <= limit,
                 "stale AGNSS week or epoch"
             );
-        } else if m.number == 1020 {
+        } else if m.number == 1020 && absolute_dates {
             let base_year = 1996 + 4 * (m.values["n4"] as i32 - 1);
             let base = Utc
                 .with_ymd_and_hms(base_year, 1, 1, 0, 0, 0)

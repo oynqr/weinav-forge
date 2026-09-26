@@ -191,7 +191,7 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
 
 #[test]
 #[ignore = "requires the author's reviewed Huawei AGNSS"]
-fn reviewed_huawei_agnss_is_not_refused_for_its_galileo_week() -> Result<()> {
+fn reviewed_huawei_agnss_is_not_refused_for_its_dates() -> Result<()> {
     use weinav_forge::{agnss, time::Instant};
     let root = PathBuf::from(
         std::env::var_os("WEINAV_REVIEW_FIXTURES")
@@ -201,16 +201,21 @@ fn reviewed_huawei_agnss_is_not_refused_for_its_galileo_week() -> Result<()> {
         fs::read(root.join("x/huawei/659dea01-0fbb-41e4-8876-e5eb5eeecc95/HW_AGNSS_RTCM_33"))?;
     let at = Instant::parse("2026-09-26T05:43:07Z")?;
     agnss::validate_fresh(&bytes, at, true)?;
-    let mut shifted = Vec::new();
-    for payload in rtcm::payloads(&bytes)? {
-        let mut message = rtcm::Message::decode(payload)?;
-        if message.number == 1046 {
-            *message.values.get_mut("week").context("Galileo week")? += 1.0;
+    for (number, field) in [(1046, "week"), (1020, "nt")] {
+        let mut shifted = Vec::new();
+        for payload in rtcm::payloads(&bytes)? {
+            let mut message = rtcm::Message::decode(payload)?;
+            if message.number == number {
+                *message.values.get_mut(field).context("date field")? += 1.0;
+            }
+            shifted.extend(rtcm::frame(&message.encode()?)?);
         }
-        shifted.extend(rtcm::frame(&message.encode()?)?);
+        agnss::validate_fresh(&shifted, at, false)?;
+        assert!(
+            agnss::validate_fresh(&shifted, at, true).is_err(),
+            "{number}"
+        );
     }
-    agnss::validate_fresh(&shifted, at, false)?;
-    assert!(agnss::validate_fresh(&shifted, at, true).is_err());
     Ok(())
 }
 
