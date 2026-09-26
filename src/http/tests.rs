@@ -208,7 +208,7 @@ fn http2_frames_match_networkkit_settings_and_pseudo_headers() -> Result<()> {
         .http2_only()
         .resolve(AGNSS_HOST, address)
         .build()?;
-    let server = thread::spawn(move || -> Result<()> {
+    let server = thread::spawn(move || -> Result<TcpStream> {
         let (mut stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut preface = [0; 24];
@@ -243,7 +243,7 @@ fn http2_frames_match_networkkit_settings_and_pseudo_headers() -> Result<()> {
                     let authority_length = (payload[3] & 0x7f) as usize;
                     assert_eq!(payload[4 + authority_length], 0x86);
                     stream.write_all(&[0, 0, 1, 1, 5, 0, 0, 0, 3, 0x88])?;
-                    return Ok(());
+                    return Ok(stream);
                 }
                 2 => panic!("unexpected HTTP/2 PRIORITY frame"),
                 4 => {}
@@ -256,7 +256,8 @@ fn http2_frames_match_networkkit_settings_and_pseudo_headers() -> Result<()> {
         None,
         None,
     );
-    server.join().expect("HTTP/2 test thread panicked")?;
+    let connection = server.join().expect("HTTP/2 test thread panicked")?;
     assert!(response?.bytes.is_empty());
+    drop(connection);
     Ok(())
 }
