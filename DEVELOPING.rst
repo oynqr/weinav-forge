@@ -48,7 +48,12 @@ Other ignored tests use the reviewed seed, broadcast snapshot and
 ``missing_vs_huawei.csv`` from the generation 3 review. Set
 ``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. These
 tests check that the 47 formerly dropped seed records fit inside the
-measured envelope, and that the BeiDou GEO record counts match Huawei.
+measured envelope, and that every BeiDou GEO record in Huawei's output is
+also shipped. The builder ships 144 GEO records where Huawei ships 139. In
+the five extra records, the fit holds ``delta_n`` at the field limit. The
+near-zero GEO inclination makes the fit weakly determined, and Huawei's rule
+for these five records is not known. The records stay inside the envelope and
+fit the seed within the limit, so the builder keeps them.
 
 Processing performance
 ----------------------

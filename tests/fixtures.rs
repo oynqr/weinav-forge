@@ -109,19 +109,28 @@ fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
         Instant::parse("2026-09-26T05:43:07Z")?,
         1.0,
     )?;
-    let epochs = record::parse_container(System::Bds, &products.files["HW_PGNSS_BDS"])?;
-    let mut counts = [0; 4];
-    for epoch in &epochs {
-        for bytes in &epoch.blocks[0] {
-            let values = record::decode(System::Bds, bytes)?;
-            let id = values["sv"] as usize;
-            if id < 4 {
-                counts[id] += 1;
-                record::validate_envelope(System::Bds, &values)?;
+    let geo_cells = |container: &[u8]| -> Result<std::collections::BTreeSet<(u8, usize)>> {
+        let mut cells = std::collections::BTreeSet::new();
+        for (index, epoch) in record::parse_container(System::Bds, container)?
+            .iter()
+            .enumerate()
+        {
+            for bytes in &epoch.blocks[0] {
+                let values = record::decode(System::Bds, bytes)?;
+                let id = values["sv"] as u8 + 1;
+                if orbit::is_geo(System::Bds, id) {
+                    record::validate_envelope(System::Bds, &values)?;
+                    cells.insert((id, index));
+                }
             }
         }
-    }
-    assert_eq!(counts, [35, 36, 33, 35]);
+        Ok(cells)
+    };
+    let shipped = geo_cells(&products.files["HW_PGNSS_BDS"])?;
+    let huawei = geo_cells(&fs::read(root.join("oracle/HW_PGNSS_BDS"))?)?;
+    assert_eq!(huawei.len(), 139);
+    let missing: Vec<_> = huawei.difference(&shipped).collect();
+    assert!(missing.is_empty(), "GEO records missing: {missing:?}");
     Ok(())
 }
 
