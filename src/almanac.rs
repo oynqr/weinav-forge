@@ -3,7 +3,7 @@ use crate::{
     policy::System,
     rinex::{Broadcast, number},
     seed::decompress,
-    time::Instant,
+    time::{GRID_STEP, Instant},
 };
 use anyhow::{Context, Result, ensure};
 use std::{collections::BTreeMap, f64::consts::PI};
@@ -278,10 +278,38 @@ pub fn build(
         count += 1;
     }
     out[0xc58] = count as u8;
-    let start = at.gps() as u32;
+    let (start, end) = validity_window(at)?;
     out[0x1858..0x185c].copy_from_slice(&start.to_le_bytes());
-    out[0x185c..0x1860].copy_from_slice(&(start + 72 * 3600).to_le_bytes());
+    out[0x185c..0x1860].copy_from_slice(&end.to_le_bytes());
     let leap = at.gps() - (at.0.timestamp() - crate::time::GPS_EPOCH_UNIX);
     out[0x1864..0x1868].copy_from_slice(&(leap as u32).to_le_bytes());
     Ok((out, notes))
+}
+
+fn validity_window(at: Instant) -> Result<(u32, u32)> {
+    let start = u32::try_from(at.gps().div_euclid(GRID_STEP) * GRID_STEP)?;
+    Ok((start, start + 270_000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_extra_window_brackets_every_shipped_epoch() -> Result<()> {
+        for gps in [1_474_436_605, 1_472_313_600, 1_472_320_799] {
+            let at = Instant::from_gps(gps)?;
+            let (start, end) = validity_window(at)?;
+            assert_eq!(i64::from(start), at.grid(System::Glonass)[0] - 3600);
+            for system in System::ALL {
+                let grid = at.grid(system);
+                assert!(i64::from(start) <= grid[0], "{system:?}");
+                assert!(
+                    grid[grid.len() - 1] + GRID_STEP <= i64::from(end),
+                    "{system:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 }
