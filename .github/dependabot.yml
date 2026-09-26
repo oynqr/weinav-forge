@@ -30,7 +30,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "03:27"
+      time: "04:27"
       timezone: Etc/UTC
     groups:
       nix:
@@ -44,7 +44,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "03:27"
+      time: "05:27"
       timezone: Etc/UTC
     groups:
       github-actions:

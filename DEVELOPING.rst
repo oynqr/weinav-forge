@@ -244,10 +244,12 @@ by a committed source manifest or current URL metadata.
 Dependency updates
 ------------------
 
-Dependabot checks Cargo, Nix flake inputs and GitHub Actions each Monday at
-03:27 UTC. It makes one version update group for each ecosystem. The
-configuration is in ``.github/dependabot.yml``. Cargo version updates
-include indirect dependencies and change only ``Cargo.lock``.
+Dependabot checks Cargo at 03:27 UTC, Nix flake inputs at 04:27 UTC, and
+GitHub Actions at 05:27 UTC each Monday. These intervals reduce overlap
+between update builds and merges. It makes one version update group for
+each ecosystem. The configuration is in ``.github/dependabot.yml``.
+Cargo version updates include indirect dependencies and change only
+``Cargo.lock``.
 External actions must use full commit pins.
 
 Enable Dependabot alerts and security updates in the repository settings.
