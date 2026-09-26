@@ -122,7 +122,10 @@ For example, save this JSON list as ``variants.json``:
 .. code-block:: json
 
   [
-    {"name": "watch", "flavor": "huawei-plus"},
+    {
+      "name": "watch",
+      "flavor": "huawei-plus"
+    },
     {
       "name": "gps-only",
       "flavor": "huawei",

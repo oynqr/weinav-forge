@@ -158,6 +158,7 @@
                 nativeBuildInputs = [
                   (this.pkgs.python3.withPackages (python: [ python.docutils ]))
                   this.pkgs.nixfmt
+                  this.pkgs.prettier
                   this.pkgs.statix
                 ];
               }
@@ -171,7 +172,7 @@
                 from docutils.core import publish_doctree
 
                 source = pathlib.Path(sys.argv[1])
-                count = 0
+                counts = {"nix": 0, "json": 0}
                 for document in sorted(source.rglob("*.rst")):
                     tree = publish_doctree(
                         document.read_text(),
@@ -179,18 +180,23 @@
                         settings_overrides={"halt_level": 2, "syntax_highlight": "none"},
                     )
                     for block in tree.findall(nodes.literal_block):
-                        if "nix" in block["classes"]:
-                            count += 1
-                            example = pathlib.Path("examples") / f"{count}-{document.stem}.nix"
+                        language = next((name for name in counts if name in block["classes"]), None)
+                        if language is not None:
+                            counts[language] += 1
+                            example = pathlib.Path("examples") / f"{counts[language]}-{document.stem}.{language}"
                             example.write_text(block.astext() + "\n")
                             print(f"{document.relative_to(source)}:{block.line}: {example}", flush=True)
-                print(f"Found {count} Nix examples", flush=True)
+                for language, count in counts.items():
+                    print(f"Found {count} {language} examples", flush=True)
                 PY
                 shopt -s nullglob
                 for example in examples/*.nix; do
                   nixfmt --check "$example"
                 done
                 statix check examples
+                for example in examples/*.json; do
+                  prettier --check "$example"
+                done
                 touch "$out"
               '';
 

@@ -164,9 +164,10 @@ longer. There is no RST formatter; docutils checks the RST syntax.
 Keep program use and service operation in ``README.rst``. Keep development
 and repository maintenance in this file.
 
-Mark each Nix example in an RST file with ``.. code-block:: nix``.
-The ``documentation`` flake check checks RST syntax and runs nixfmt and
-statix on these examples. Run it with:
+Mark Nix examples with ``.. code-block:: nix`` and JSON examples with
+``.. code-block:: json``. The ``documentation`` flake check checks RST
+syntax, runs nixfmt and statix on Nix examples, and checks JSON formatting
+with Prettier. CI runs this check. Run it locally with:
 
 .. code-block:: bash
 
