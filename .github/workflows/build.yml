@@ -83,7 +83,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
       - name: Check the format
         run: |
-          nix shell --inputs-from . nixpkgs#nixfmt-rfc-style -c nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
+          nix shell --inputs-from . nixpkgs#nixfmt -c nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
           nix shell --inputs-from . nixpkgs#taplo -c taplo fmt --check Cargo.toml .cargo/config.toml
           nix shell --inputs-from . nixpkgs#prettier -c prettier --check .github/dependabot.yml .github/workflows/*.yml
       - name: Lint the files

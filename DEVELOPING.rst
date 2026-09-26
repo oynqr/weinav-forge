@@ -142,7 +142,7 @@ same tool versions as CI:
 
 .. code-block:: bash
 
-  nix shell --inputs-from . nixpkgs#nixfmt-rfc-style -c \
+  nix shell --inputs-from . nixpkgs#nixfmt -c \
     nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
   nix shell --inputs-from . nixpkgs#statix -c statix check
   nix shell --inputs-from . nixpkgs#deadnix -c \
