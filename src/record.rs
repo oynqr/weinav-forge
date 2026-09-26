@@ -303,6 +303,28 @@ mod tests {
     }
 
     #[test]
+    fn gps_af1_is_one_signed_word_and_delta_n_one_half_word() -> Result<()> {
+        let lsb = 2_f64.powi(-43);
+        for (af1, expected) in [
+            (-0.4 * lsb, [0, 0, 0, 0]),
+            (-0.5 * lsb, [0xff, 0xff, 0xff, 0xff]),
+            (-202.0 * lsb, [0x36, 0xff, 0xff, 0xff]),
+            (168.0 * lsb, [0xa8, 0, 0, 0]),
+        ] {
+            let mut values = zero_values(System::Gps);
+            values.insert("af1".into(), af1);
+            values.insert("delta_n".into(), -1837.0 * lsb);
+            let mut bytes = encode(System::Gps, &values)?;
+            assert_eq!(&bytes[0x3c..0x40], &expected);
+            assert_eq!(&bytes[0x0c..0x10], &[0xd3, 0xf8, 0, 0]);
+            assert_eq!(decode(System::Gps, &bytes)?["delta_n"], -1837.0 * lsb);
+            bytes[0x0f] = 0xff;
+            assert!(decode(System::Gps, &bytes).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn qzss_negative_delay_has_zero_pad() -> Result<()> {
         let mut values = zero_values(System::Qzs);
         values.insert("tgd".into(), -50.0 * 2_f64.powi(-31));

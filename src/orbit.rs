@@ -597,7 +597,6 @@ pub fn record_values(
         System::Gps => {
             values.insert("week".into(), (time / 604_800.0).floor());
             values.insert("unk4c".into(), 65280.0);
-            values.insert("unk3e".into(), if clock[1] < 0.0 { -1.0 } else { 0.0 });
             values.insert("tgd".into(), tgd[0]);
         }
         System::Bds => {

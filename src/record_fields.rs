@@ -28,7 +28,7 @@ pub fn fields(system: System) -> &'static [Field] {
             Field {
                 name: "delta_n",
                 offset: 12,
-                bytes: 4,
+                bytes: 2,
                 signed: true,
                 scale: 1.1368683772161603e-13,
             },
@@ -140,16 +140,9 @@ pub fn fields(system: System) -> &'static [Field] {
             Field {
                 name: "af1",
                 offset: 60,
-                bytes: 2,
+                bytes: 4,
                 signed: true,
                 scale: 1.1368683772161603e-13,
-            },
-            Field {
-                name: "unk3e",
-                offset: 62,
-                bytes: 2,
-                signed: true,
-                scale: 1.0,
             },
             Field {
                 name: "toc",
