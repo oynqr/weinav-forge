@@ -221,7 +221,7 @@ let
             >> "$stage/variants.jsonl"
         fi
       '') names}
-      jq -s '{version:1,variants:.}' "$stage/variants.jsonl" > "$stage/manifest.json"
+      jq -cjs '{version:1,variants:.}' "$stage/variants.jsonl" > "$stage/manifest.json"
       candidate=$(mktemp -u "$destination/.generations/.stage.XXXXXXXXXXXX")
       mkdir -m 0770 "$candidate"
       publication=$candidate

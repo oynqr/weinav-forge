@@ -248,7 +248,9 @@ pkgs.testers.runNixOSTest {
         return machine.succeed("sha256sum ${public}/watch/current/ephemeris.zip").split()[0]
 
     def check_manifest(expected=("secondary", "watch")):
-        manifest = json.loads(machine.succeed("curl -fsS http://localhost/agnss/manifest.json"))
+        data = machine.succeed("curl -fsS http://localhost/agnss/manifest.json")
+        manifest = json.loads(data)
+        assert data == json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
         assert manifest["version"] == 1
         assert [variant["name"] for variant in manifest["variants"]] == list(expected)
         for variant in manifest["variants"]:
