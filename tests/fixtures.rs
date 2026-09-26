@@ -74,6 +74,58 @@ fn fixture(name: &str) -> Result<Vec<u8>> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed seed and broadcast snapshots"]
+fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2.dat")]),
+        (
+            Role::Broadcast,
+            vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
+        ),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &[System::Bds],
+        false,
+        &local,
+    )?;
+    let products = build::assemble(
+        &inputs,
+        Flavor::Huawei,
+        &[System::Bds],
+        false,
+        Instant::parse("2026-09-26T05:43:07Z")?,
+        1.0,
+    )?;
+    let epochs = record::parse_container(System::Bds, &products.files["HW_PGNSS_BDS"])?;
+    let mut counts = [0; 4];
+    for epoch in &epochs {
+        for bytes in &epoch.blocks[0] {
+            let values = record::decode(System::Bds, bytes)?;
+            let id = values["sv"] as usize;
+            if id < 4 {
+                counts[id] += 1;
+                record::validate_envelope(System::Bds, &values, true)?;
+            }
+        }
+    }
+    assert_eq!(counts, [35, 36, 33, 35]);
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires local Huawei fixtures"]
 fn seed_and_extra_match_captured_bytes() -> Result<()> {
     let seed = Seed::parse(&fixture("HiEE_V2.expired-20260909.dat.gz")?)?;

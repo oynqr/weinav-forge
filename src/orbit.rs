@@ -188,6 +188,34 @@ pub fn position(p: &Parameters, dt: f64, toe: f64, system: System, geo: bool) ->
     }
 }
 
+pub fn is_geo(system: System, id: u8) -> bool {
+    system == System::Bds && (id <= 5 || id >= 59)
+}
+
+fn geo_frame([x, y, z]: [f64; 3], dt: f64) -> [f64; 3] {
+    let (s, c) = (earth_rate(System::Bds) * dt).sin_cos();
+    let x1 = x * c - y * s;
+    let y1 = x * s + y * c;
+    let (s, c) = (-5_f64.to_radians()).sin_cos();
+    [x1, y1 * c - z * s, y1 * s + z * c]
+}
+
+pub fn initial_geo(state: &State, toe: f64) -> Result<Parameters> {
+    let rate = Vector3::new(0.0, 0.0, earth_rate(System::Bds));
+    let position = Vector3::from(geo_frame(state.position, 0.0));
+    let velocity = Vector3::from(state.velocity) + rate.cross(&Vector3::from(state.position));
+    let velocity = Vector3::from(geo_frame(velocity.into(), 0.0)) - rate.cross(&position);
+    initial(
+        &State {
+            position: position.into(),
+            velocity: velocity.into(),
+            ..state.clone()
+        },
+        toe,
+        System::Bds,
+    )
+}
+
 pub fn initial(state: &State, toe: f64, system: System) -> Result<Parameters> {
     let r = Vector3::from(state.position);
     let v = Vector3::from(state.velocity) + Vector3::new(0.0, 0.0, earth_rate(system)).cross(&r);
@@ -393,7 +421,7 @@ pub fn fit(
     start: Parameters,
     pinned_dn: Option<f64>,
 ) -> Result<Fit> {
-    fit_bounded(samples, toe, system, start, pinned_dn, &[])
+    fit_bounded(samples, toe, system, start, pinned_dn, &[], false)
 }
 
 pub fn fit_in_envelope(
@@ -403,7 +431,22 @@ pub fn fit_in_envelope(
     start: Parameters,
     pinned_dn: Option<f64>,
 ) -> Result<Fit> {
-    let free = fit(samples, toe, system, start, pinned_dn)?;
+    fit_envelope(samples, toe, system, start, pinned_dn, false)
+}
+
+pub fn fit_geo(samples: &[(f64, [f64; 3])], toe: f64, start: Parameters) -> Result<Fit> {
+    fit_envelope(samples, toe, System::Bds, start, None, true)
+}
+
+fn fit_envelope(
+    samples: &[(f64, [f64; 3])],
+    toe: f64,
+    system: System,
+    start: Parameters,
+    pinned_dn: Option<f64>,
+    geo: bool,
+) -> Result<Fit> {
+    let free = fit_bounded(samples, toe, system, start, pinned_dn, &[], geo)?;
     let bounds = record::fit_bounds(system);
     if bounds
         .iter()
@@ -411,7 +454,15 @@ pub fn fit_in_envelope(
     {
         return Ok(free);
     }
-    fit_bounded(samples, toe, system, free.parameters, pinned_dn, &bounds)
+    fit_bounded(
+        samples,
+        toe,
+        system,
+        free.parameters,
+        pinned_dn,
+        &bounds,
+        geo,
+    )
 }
 
 fn fit_bounded(
@@ -421,8 +472,16 @@ fn fit_bounded(
     start: Parameters,
     pinned_dn: Option<f64>,
     bounds: &[(usize, f64, f64)],
+    geo: bool,
 ) -> Result<Fit> {
     ensure!(samples.len() >= 9, "not enough samples to fit orbit");
+    let transformed = geo.then(|| {
+        samples
+            .iter()
+            .map(|&(dt, xyz)| (dt, geo_frame(xyz, dt)))
+            .collect::<Vec<_>>()
+    });
+    let samples = transformed.as_deref().unwrap_or(samples);
     let indices: Vec<usize> = (0..15).filter(|&j| j != 6 || pinned_dn.is_none()).collect();
     let steps: [f64; 15] = [
         1e-5, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1e-13, 1e-13, 1e-13, 1e-9, 1e-9, 1e-9, 1e-9, 1e-4, 1e-4,
@@ -436,7 +495,7 @@ fn fit_bounded(
             .iter()
             .enumerate()
             .map(|(index, &(dt, _))| {
-                orbit.geometry(dt, toe, false, cached.and_then(|g| g.get(index)))
+                orbit.geometry(dt, toe, geo, cached.and_then(|g| g.get(index)))
             })
             .collect();
         let values = DVector::from_iterator(
@@ -637,6 +696,39 @@ pub fn glonass_acceleration(p: [f64; 3], v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fits_geostationary_orbits_in_the_rotated_frame() -> Result<()> {
+        let system = System::Bds;
+        let p = [
+            6493.0, 0.0003, 0.09, 1.2, -0.7, 0.4, 2e-9, -2e-9, 3e-10, 1e-6, -2e-6, 8e-8, -6e-8,
+            210.0, -140.0,
+        ];
+        let toe = 604_000.0;
+        let samples = (-24..=24)
+            .map(|i| {
+                let dt = f64::from(i) * 150.0;
+                Ok((dt, position(&p, dt, toe, system, true)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let left = position(&p, -0.5, toe, system, true)?;
+        let right = position(&p, 0.5, toe, system, true)?;
+        let state = State {
+            position: position(&p, 0.0, toe, system, true)?,
+            velocity: std::array::from_fn(|i| right[i] - left[i]),
+            acceleration: [0.0; 3],
+            clock: 0.0,
+            drift: 0.0,
+        };
+        let fitted = fit_geo(&samples, toe, initial_geo(&state, toe)?)?;
+        assert!(fitted.rms < 0.01, "{}", fitted.rms);
+        for dt in [-3525.0, -75.0, 1725.0, 3525.0] {
+            let expected = Vector3::from(position(&p, dt, toe, system, true)?);
+            let actual = Vector3::from(position(&fitted.parameters, dt, toe, system, true)?);
+            assert!((actual - expected).norm() < 0.01);
+        }
+        Ok(())
+    }
 
     #[test]
     fn bounded_refit_recovers_orbits_outside_the_harmonic_envelope() -> Result<()> {

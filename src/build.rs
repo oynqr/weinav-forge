@@ -222,7 +222,6 @@ impl Inputs {
                 self.broadcast
                     .nearest(system, id, at.gps() as f64)
                     .is_some_and(|n| n.healthy())
-                    && !(system == System::Bds && (id <= 5 || id >= 59))
             })
             .collect();
         !ids.is_empty()
@@ -290,7 +289,12 @@ fn kepler(
 ) -> Result<(Vec<u8>, f64, f64)> {
     let toe = (time - if system == System::Bds { 14.0 } else { 0.0 }).rem_euclid(604800.0);
     let center = inputs.state(system, id, time, provider)?;
-    let start = orbit::initial(&center, toe, system)?;
+    let geo = orbit::is_geo(system, id);
+    let start = if geo {
+        orbit::initial_geo(&center, toe)?
+    } else {
+        orbit::initial(&center, toe, system)?
+    };
     let samples: Vec<_> = (-24..=24)
         .map(|i| {
             let dt = f64::from(i) * 150.0;
@@ -309,7 +313,11 @@ fn kepler(
     } else {
         None
     };
-    let fit = orbit::fit_in_envelope(&positions, toe, system, start, pinned)?;
+    let fit = if geo {
+        orbit::fit_geo(&positions, toe, start)?
+    } else {
+        orbit::fit_in_envelope(&positions, toe, system, start, pinned)?
+    };
     ensure!(
         fit.rms <= fit_limit,
         "fit RMS {:.3} m exceeds limit",
@@ -344,7 +352,7 @@ fn kepler(
     let p = orbit::parameters(&values)?;
     let mut residual = 0.0;
     for (dt, state) in &samples {
-        let xyz = orbit::position(&p, *dt, toe, system, false)?;
+        let xyz = orbit::position(&p, *dt, toe, system, geo)?;
         residual += (0..3)
             .map(|i| (xyz[i] - state.position[i]).powi(2))
             .sum::<f64>();
@@ -552,10 +560,6 @@ pub fn assemble(
                 let mut blocks = Vec::new();
                 let mut screened_ids = BTreeSet::new();
                 for id in inputs.ids(system, orbit) {
-                    if system == System::Bds && (id <= 5 || id >= 59) {
-                        report.removals.push(format!("{id}: GEO excluded"));
-                        continue;
-                    }
                     let screen = (|| -> Result<()> {
                         let nav = inputs
                             .broadcast
