@@ -1,0 +1,46 @@
+name: cache garbage collection
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Show the proposed cache cleanup without changing the cache
+        type: boolean
+        default: false
+
+concurrency:
+  group: hestia-gc
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gc:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
+      - name: Install the cache tool
+        uses: Mic92/hestia@dfed9ced335d28978ba74e513939a10db1f71025
+        with:
+          read-only: true
+      - name: Collect unused cache data
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          arguments=()
+          if [[ "$DRY_RUN" == true ]]; then
+            arguments+=(--dry-run)
+          fi
+          "$HESTIA_BIN" gc "${arguments[@]}"

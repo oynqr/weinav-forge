@@ -14,14 +14,13 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  NIX_CONFIG: |
-    extra-substituters = https://cache.nixos.org?priority=0
-
 jobs:
   build:
     name: ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -44,11 +43,7 @@ jobs:
           determinate: false
           diagnostic-endpoint: ""
       - name: Use the Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7
-        with:
-          use-flakehub: disabled
-          use-gha-cache: enabled
-          diagnostic-endpoint: ""
+        uses: Mic92/hestia@dfed9ced335d28978ba74e513939a10db1f71025
       - name: Check the flake
         run: nix flake check --no-update-lock-file --print-build-logs
       - name: Build the tool
