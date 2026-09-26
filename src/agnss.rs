@@ -168,9 +168,10 @@ pub fn build(
     broadcast: &Broadcast,
     systems: &[System],
     at: Instant,
-) -> Result<(Vec<u8>, Vec<String>)> {
+) -> Result<(Vec<u8>, Vec<String>, usize)> {
     let mut out = Vec::new();
     let mut notes = Vec::new();
+    let mut omitted = 0;
     let now = at.gps() as f64;
     for system in [System::Gps, System::Glonass, System::Bds, System::Galileo] {
         if !systems.contains(&system) {
@@ -189,6 +190,7 @@ pub fn build(
                 ages.push(age);
             }
         }
+        omitted += stale;
         if stale > 0 {
             notes.push(format!(
                 "AGNSS: {stale} GLONASS ephemerides with t_b more than 30 min from the build are omitted"
@@ -217,7 +219,7 @@ pub fn build(
         Some(message) => out.extend(rtcm::frame(&message.encode()?)?),
         None => notes.push("AGNSS: GPS ionosphere coefficients are absent".into()),
     }
-    Ok((out, notes))
+    Ok((out, notes, omitted))
 }
 
 pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result<Vec<String>> {

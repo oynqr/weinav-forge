@@ -335,6 +335,7 @@ pub struct Products {
     pub epochs: Vec<EpochReport>,
     pub notes: Vec<String>,
     pub screened: usize,
+    pub agnss_glonass_omitted: Option<usize>,
 }
 
 fn clock_fit(samples: &[(f64, State)]) -> Result<[f64; 3]> {
@@ -504,6 +505,7 @@ pub fn assemble(
         epochs: Vec::new(),
         notes: Vec::new(),
         screened: 0,
+        agnss_glonass_omitted: None,
     };
     if let Some(seed) = &inputs.seed {
         ensure!(
@@ -550,8 +552,9 @@ pub fn assemble(
         let bytes = if matches!(flavor, Flavor::Huawei | Flavor::HuaweiPlus) {
             crate::seed::decompress(&inputs.raw[&Role::Agnss][0])?.into_owned()
         } else {
-            let (bytes, notes) = crate::agnss::build(&inputs.broadcast, systems, at)?;
+            let (bytes, notes, omitted) = crate::agnss::build(&inputs.broadcast, systems, at)?;
             product.notes.extend(notes);
+            product.agnss_glonass_omitted = Some(omitted);
             bytes
         };
         product.notes.extend(crate::agnss::validate_fresh(

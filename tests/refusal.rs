@@ -31,6 +31,7 @@ fn a_full_length_zero_census_is_refused() -> Result<()> {
         epochs: vec![],
         notes: vec![],
         screened: 0,
+        agnss_glonass_omitted: None,
     };
     let gate = gate::inspect(
         &products,
@@ -137,6 +138,7 @@ fn live_block_census_allows_screening_but_rejects_sparse_output() -> Result<()> 
                 epochs: vec![],
                 notes: vec![],
                 screened: 0,
+                agnss_glonass_omitted: None,
             };
             let gate = gate::inspect(
                 &products,
@@ -197,6 +199,7 @@ fn declared_whole_grid_gaps_require_open_permission() -> Result<()> {
             epochs: reports,
             notes: vec![],
             screened: 0,
+            agnss_glonass_omitted: None,
         };
         for permission in [false, true] {
             let gate = gate::inspect(

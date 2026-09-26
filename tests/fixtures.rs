@@ -395,7 +395,7 @@ fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
         root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz"),
     )?)?;
     let at = Instant::parse("2026-09-26T05:43:07Z")?;
-    let (bytes, _) = agnss::build(&broadcast, &System::ALL, at)?;
+    let (bytes, _, _) = agnss::build(&broadcast, &System::ALL, at)?;
     agnss::validate_fresh(&bytes, at, true)?;
     agnss::validate_fresh(&bytes, Instant::parse("2026-09-26T06:14:00Z")?, true)?;
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
@@ -424,13 +424,15 @@ fn reviewed_open_agnss_omits_only_stale_glonass() -> Result<()> {
         Ok(count)
     };
     let fresh = Instant::parse("2026-09-26T06:14:00Z")?;
-    let (bytes, notes) = agnss::build(&broadcast, &System::ALL, fresh)?;
+    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, fresh)?;
     assert!(count(&bytes, 1020)? > 0);
+    assert_eq!(omitted, 0);
     assert!(!notes.iter().any(|n| n.contains("omitted")), "{notes:?}");
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
-    let (bytes, notes) = agnss::build(&broadcast, &System::ALL, late)?;
+    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, late)?;
     agnss::validate_fresh(&bytes, late, true)?;
     assert_eq!(count(&bytes, 1020)?, 0);
+    assert!(omitted > 0);
     assert!(count(&bytes, 1019)? > 0 && count(&bytes, 1042)? > 0 && count(&bytes, 1046)? > 0);
     assert!(
         notes

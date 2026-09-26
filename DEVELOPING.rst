@@ -262,8 +262,13 @@ therefore accepts those two fields within these bounds, and the report notes
 each such message; the time of week and the time of day must still be
 current. The external gate reads neither field. When the builder makes AGNSS
 from broadcast, it omits each GLONASS
-ephemeris whose ``t_b`` is more than 30 minutes from the build time and notes
-the count, because BKG publishes each new ``t_b`` a few minutes late. Each
+ephemeris whose ``t_b`` is more than 30 minutes from the build time, because
+BKG publishes each new ``t_b`` a few minutes late. The report counts them in
+``agnss_glonass_omitted``, which is null when the AGNSS does not come from
+broadcast. When every GLONASS ephemeris is 30 minutes to 2 hours old, the
+stream carries no GLONASS. When no healthy GLONASS ephemeris is within 2 hours,
+the build is refused, because the broadcast source is then broken rather than
+late. Each
 build fetches the broadcast files again. The fetcher reuses a cached URL for at
 most 2 minutes, so a snapshot never carries over to the next regeneration.
 

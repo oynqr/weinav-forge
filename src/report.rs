@@ -178,6 +178,7 @@ mod tests {
             epochs,
             notes: vec![],
             screened: 0,
+            agnss_glonass_omitted: None,
         };
         let inputs = Inputs {
             sources: vec![
