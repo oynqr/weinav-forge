@@ -309,7 +309,7 @@ impl Navigation {
         let toe = self.toe()?;
         let tow = self.get("toe")?;
         let geo = orbit::is_geo(self.system, self.svid);
-        let pos = |t| orbit::position(&p, t - toe, tow, self.system, geo);
+        let pos = |t| orbit::broadcast_position(&p, t - toe, tow, self.system, geo);
         let position = pos(time)?;
         let left = pos(time - 0.5)?;
         let right = pos(time + 0.5)?;

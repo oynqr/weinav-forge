@@ -21,6 +21,14 @@ pub fn gravity(system: System) -> f64 {
     }
 }
 
+pub fn record_gravity(system: System) -> f64 {
+    gravity(if system == System::Bds {
+        System::Gps
+    } else {
+        system
+    })
+}
+
 pub fn earth_rate(system: System) -> f64 {
     if system == System::Bds {
         7.292_115e-5
@@ -77,6 +85,10 @@ fn sin_cos_cached(angle: f64, cached: Option<(f64, (f64, f64))>) -> (f64, f64) {
 
 impl Orbit {
     fn new(parameters: Parameters, system: System) -> Result<Self> {
+        Self::with_gravity(parameters, system, record_gravity(system))
+    }
+
+    fn with_gravity(parameters: Parameters, system: System, gm: f64) -> Result<Self> {
         ensure!(
             parameters.iter().all(|x| x.is_finite())
                 && parameters[0] > 0.0
@@ -85,7 +97,7 @@ impl Orbit {
         );
         Ok(Self {
             semi_major: parameters[0] * parameters[0],
-            unperturbed_motion: gravity(system).sqrt() / parameters[0].powi(3),
+            unperturbed_motion: gm.sqrt() / parameters[0].powi(3),
             eccentricity_scale: (1.0 - parameters[1] * parameters[1]).sqrt(),
             earth_rate: earth_rate(system),
             parameters,
@@ -175,7 +187,25 @@ impl Orbit {
 }
 
 pub fn position(p: &Parameters, dt: f64, toe: f64, system: System, geo: bool) -> Result<[f64; 3]> {
-    let orbit = Orbit::new(*p, system)?;
+    evaluate(&Orbit::new(*p, system)?, dt, toe, geo)
+}
+
+pub fn broadcast_position(
+    p: &Parameters,
+    dt: f64,
+    toe: f64,
+    system: System,
+    geo: bool,
+) -> Result<[f64; 3]> {
+    evaluate(
+        &Orbit::with_gravity(*p, system, gravity(system))?,
+        dt,
+        toe,
+        geo,
+    )
+}
+
+fn evaluate(orbit: &Orbit, dt: f64, toe: f64, geo: bool) -> Result<[f64; 3]> {
     let [x, y, z] = orbit.geometry(dt, toe, geo, None).position;
     if geo {
         let (s, c) = (-5_f64.to_radians()).sin_cos();
@@ -221,7 +251,7 @@ pub fn initial(state: &State, toe: f64, system: System) -> Result<Parameters> {
     let v = Vector3::from(state.velocity) + Vector3::new(0.0, 0.0, earth_rate(system)).cross(&r);
     let radius = r.norm();
     let h = r.cross(&v);
-    let gm = gravity(system);
+    let gm = record_gravity(system);
     let a = -gm / (v.dot(&v) - 2.0 * gm / radius);
     let eccentricity = v.cross(&h) / gm - r / radius;
     let ecc = eccentricity.norm();
@@ -835,6 +865,24 @@ mod tests {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bds_records_use_the_gps_gravity_and_broadcast_keeps_the_icd_gravity() -> Result<()> {
+        let p = [
+            5282.61, 0.0, 0.96, 1.2, -0.7, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let toe = 230_400.0;
+        for dt in [-3600.0, 3600.0] {
+            let gps = Vector3::from(position(&p, dt, toe, System::Gps, false)?);
+            let gps_broadcast = Vector3::from(broadcast_position(&p, dt, toe, System::Gps, false)?);
+            assert_eq!(gps, gps_broadcast);
+            let record = Vector3::from(position(&p, dt, toe, System::Bds, false)?);
+            let broadcast = Vector3::from(broadcast_position(&p, dt, toe, System::Bds, false)?);
+            let difference = (record - broadcast).norm();
+            assert!((0.9..1.2).contains(&difference), "{difference}");
         }
         Ok(())
     }
