@@ -190,6 +190,75 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed seed, broadcast snapshot and Huawei output"]
+fn reviewed_satellites_flagged_at_build_time_match_huawei() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let run = root.join("agent_flagged_p18h");
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2.dat")]),
+        (Role::Broadcast, vec![run.join("brdc_until_at.rnx.gz")]),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &System::ALL,
+        false,
+        &local,
+    )?;
+    let at = Instant::parse("2026-09-26T14:59:42Z")?;
+    let flagged = |system: System, id: u8| {
+        inputs.satellites[&system][&id]
+            .arc_at(at.gps() as f64)
+            .is_some_and(|arc| arc.flag != 0)
+    };
+    assert!(flagged(System::Glonass, 15) && flagged(System::Bds, 6) && flagged(System::Bds, 9));
+    let products = build::assemble(&inputs, Flavor::Huawei, &System::ALL, false, at, 1.0)?;
+    for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
+        let name = format!("HW_PGNSS_{}", system.name());
+        let ours = kepler_cells(system, &products.files[&name])?;
+        let huawei = kepler_cells(system, &fs::read(run.join("oracle").join(&name))?)?;
+        assert!(ours.keys().eq(huawei.keys()), "{system:?}");
+    }
+    let records = |container: &[u8]| -> Result<BTreeMap<(u8, usize, usize), Vec<u8>>> {
+        let mut records = BTreeMap::new();
+        for (index, epoch) in record::parse_container(System::Glonass, container)?
+            .iter()
+            .enumerate()
+        {
+            for (block, bytes) in epoch.blocks.iter().enumerate() {
+                for bytes in bytes {
+                    let slot = record::decode(System::Glonass, bytes)?["slot"] as u8 + 1;
+                    records.insert((slot, index, block), bytes.clone());
+                }
+            }
+        }
+        Ok(records)
+    };
+    let ours = records(&products.files["HW_PGNSS_GLONASS"])?;
+    let mut huawei = records(&fs::read(run.join("oracle/HW_PGNSS_GLONASS"))?)?;
+    let unhealthy_in_broadcast = 20;
+    huawei.retain(|(slot, _, _), _| *slot != unhealthy_in_broadcast);
+    assert!(ours.keys().any(|(slot, _, _)| *slot == 15));
+    assert!(
+        ours == huawei,
+        "{} of {} GLONASS records",
+        ours.len(),
+        huawei.len()
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires the author's reviewed Huawei AGNSS"]
 fn reviewed_huawei_agnss_is_not_refused_for_its_dates() -> Result<()> {
     use weinav_forge::{agnss, time::Instant};

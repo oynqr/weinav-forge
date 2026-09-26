@@ -240,8 +240,9 @@ the field scale. Update them together when the gate's corpus changes.
 
 Seed arcs with the flag set are not used. A Kepler record is removed when one
 of its fit samples falls in such an arc, and a GLONASS record when its time
-does. Each satellite's orbit is compared with broadcast at the build time,
-except when the seed arc at that time has the flag set.
+does. Each satellite's orbit is compared with broadcast at the build time.
+When the seed arc at that time has the flag set, that comparison uses the
+flagged arc, which no record uses.
 
 The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external

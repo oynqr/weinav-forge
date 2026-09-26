@@ -199,12 +199,9 @@ impl Inputs {
         arc.evaluate(time)
     }
 
-    fn seed_flagged(&self, system: System, id: u8, time: f64) -> bool {
-        self.satellites
-            .get(&system)
-            .and_then(|s| s.get(&id))
-            .and_then(|s| s.arc_at(time))
-            .is_some_and(|arc| arc.flag != 0)
+    fn flagged_seed_state(&self, system: System, id: u8, time: f64) -> Option<Result<State>> {
+        let arc = self.satellites.get(&system)?.get(&id)?.arc_at(time)?;
+        (arc.flag != 0).then(|| arc.evaluate(time))
     }
 
     fn state(&self, system: System, id: u8, time: f64, provider: &str) -> Result<State> {
@@ -636,15 +633,19 @@ pub fn assemble(
                 for id in inputs.ids(system, orbit) {
                     let screen = (|| -> Result<()> {
                         inputs.screen_health(system, id, at)?;
-                        if orbit == "hiee" && inputs.seed_flagged(system, id, at.gps() as f64) {
-                            return Ok(());
-                        }
+                        let now = at.gps() as f64;
                         let reference = inputs
                             .broadcast
-                            .nearest(system, id, at.gps() as f64)
+                            .nearest(system, id, now)
                             .context("absent from fresh broadcast")?
-                            .state(at.gps() as f64)?;
-                        let candidate = inputs.state(system, id, at.gps() as f64, orbit)?;
+                            .state(now)?;
+                        let flagged = (orbit == "hiee")
+                            .then(|| inputs.flagged_seed_state(system, id, now))
+                            .flatten();
+                        let candidate = match flagged {
+                            Some(state) => state?,
+                            None => inputs.state(system, id, now, orbit)?,
+                        };
                         let distance = (0..3)
                             .map(|i| (reference.position[i] - candidate.position[i]).powi(2))
                             .sum::<f64>()
