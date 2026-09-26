@@ -131,7 +131,7 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
             vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
         ),
     ]);
-    let systems = [System::Gps, System::Bds, System::Qzs];
+    let systems = [System::Gps, System::Galileo, System::Bds, System::Qzs];
     let cache = tempfile::tempdir()?;
     let inputs = build::Inputs::load(cache.path(), None, Flavor::Huawei, &systems, false, &local)?;
     let products = build::assemble(
@@ -163,6 +163,7 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
                 .map(|(k, _)| *k)
                 .collect()
         };
+        assert_eq!(keys(&ours, false), keys(&huawei, false), "{system:?}");
         match system {
             System::Gps => {
                 let mut compared = 0;
@@ -180,14 +181,9 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
                 }
                 assert!(compared >= 1000, "{compared}");
             }
-            System::Bds => {
-                assert_eq!(keys(&huawei, true).len(), 139);
-                assert_eq!(keys(&ours, true), keys(&huawei, true));
-            }
-            _ => {
-                assert_eq!(huawei.len(), 47);
-                assert_eq!(keys(&ours, false), keys(&huawei, false));
-            }
+            System::Bds => assert_eq!(keys(&huawei, true).len(), 139),
+            System::Qzs => assert_eq!(huawei.len(), 47),
+            _ => {}
         }
     }
     Ok(())
