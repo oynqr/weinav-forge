@@ -48,12 +48,8 @@ Other ignored tests use the reviewed seed, broadcast snapshot and
 ``missing_vs_huawei.csv`` from the generation 3 review. Set
 ``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. These
 tests check that the 47 formerly dropped seed records fit inside the
-measured envelope, and that every BeiDou GEO record in Huawei's output is
-also shipped. The builder ships 144 GEO records where Huawei ships 139. In
-the five extra records, the fit holds ``delta_n`` at the field limit. The
-near-zero GEO inclination makes the fit weakly determined, and Huawei's rule
-for these five records is not known. The records stay inside the envelope and
-fit the seed within the limit, so the builder keeps them.
+measured envelope without bounds, and that the BeiDou GEO records are the
+same 139 records that Huawei ships.
 
 Processing performance
 ----------------------
@@ -217,9 +213,14 @@ quantised orbit check permits 0.5 metre beyond the configured fit limit.
 Nearly circular orbits use numerical derivatives because the analytic
 coordinate conversion divides by eccentricity.
 
-A seed refit that leaves the measured harmonic envelope is fitted again with
-the harmonic terms bounded to the envelope. BeiDou GEO satellites use the
-extra rotation of the BeiDou ICD. BeiDou records use the GPS gravity
+Each Kepler record is fitted to 49 positions from 2 hours before to 2 hours
+after the epoch, every 300 seconds, as Huawei's library does. The fit limit
+applies to the standard error, which divides the squared residuals by
+``3n - 15``. The builder never bounds or clamps a field. A record with a field
+outside its vendor range is removed, and the report lists it. Huawei omits the
+same BeiDou GEO and QZSS records. Fields are rounded to nearest, with ties away
+from zero. A BeiDou orbit near 42164 km with an inclination below 10 degrees
+is a GEO orbit and uses the extra rotation of the BeiDou ICD. BeiDou records use the GPS gravity
 constant, as Huawei's records do; broadcast evaluation keeps the ICD value.
 Records carry zero ``gamma_n`` and ``af2``, as genuine Huawei files do.
 BeiDou prediction clocks have a common offset that drifts against the seed.

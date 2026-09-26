@@ -48,7 +48,7 @@ pub fn encode(system: System, values: &BTreeMap<String, f64>) -> Result<Vec<u8>>
         let value = values
             .get(field.name)
             .with_context(|| format!("missing {} field {}", system.name(), field.name))?;
-        let integer = (value / field.scale).round_ties_even();
+        let integer = (value / field.scale).round();
         let width = field.bytes * 8;
         let (low, high) = if field.signed {
             (-(1_i64 << (width - 1)), (1_i64 << (width - 1)) - 1)
@@ -71,32 +71,6 @@ pub fn zero_values(system: System) -> BTreeMap<String, f64> {
     schema::fields(system)
         .iter()
         .map(|f| (f.name.to_owned(), 0.0))
-        .collect()
-}
-
-pub fn fit_bounds(system: System) -> Vec<(usize, f64, f64)> {
-    crate::orbit::PARAMETER_NAMES
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !matches!(index, 1 | 3..=5))
-        .filter_map(|(index, name)| {
-            envelopes::bounds(system)
-                .iter()
-                .find(|(field, _, _)| field == name)
-                .map(|&(_, low, high)| {
-                    let scale = if matches!(index, 2..=8) {
-                        std::f64::consts::PI
-                    } else {
-                        1.0
-                    };
-                    let low = if system == System::Qzs && index == 6 {
-                        low.max(0.0)
-                    } else {
-                        low
-                    };
-                    (index, low * scale, high * scale)
-                })
-        })
         .collect()
 }
 
@@ -172,7 +146,7 @@ pub fn validate(system: System, values: &BTreeMap<String, f64>) -> Result<()> {
                 }
                 _ => continue,
             };
-            let raw = (values[field.name] / field.scale).round_ties_even();
+            let raw = (values[field.name] / field.scale).round();
             ensure!(
                 raw >= -(1_i64 << (width - 1)) as f64 && raw < (1_i64 << (width - 1)) as f64,
                 "{} exceeds vendor width",

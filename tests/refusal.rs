@@ -185,7 +185,7 @@ fn declared_whole_grid_gaps_require_open_permission() -> Result<()> {
                 actual_clock_providers: vec!["empty".into()],
                 source_hashes: vec![],
                 counts: vec![0],
-                fit_rms_max_m: 0.0,
+                fit_sigma_max_m: 0.0,
                 quantized_rms_max_m: 0.0,
                 clock_alignment_ns: None,
                 removals: vec![],

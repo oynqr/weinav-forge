@@ -117,7 +117,7 @@ struct Process {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Set the maximum orbit fit RMS in metres."
+        help = "Set the maximum standard error of the orbit fit in metres."
     )]
     fit_rms: f64,
     #[arg(

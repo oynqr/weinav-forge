@@ -5,7 +5,7 @@ use weinav_forge::{extra, orbit, policy::System, record, rtcm, seed::Seed};
 
 #[test]
 #[ignore = "requires the author's reviewed seed and missing-record CSV"]
-fn reviewed_missing_seed_records_fit_inside_the_envelope() -> Result<()> {
+fn reviewed_missing_seed_records_fit_freely_inside_the_envelope() -> Result<()> {
     let root = PathBuf::from(
         std::env::var_os("WEINAV_REVIEW_FIXTURES")
             .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
@@ -27,26 +27,26 @@ fn reviewed_missing_seed_records_fit_inside_the_envelope() -> Result<()> {
         let toe = (time - if system == System::Bds { 14.0 } else { 0.0 }).rem_euclid(604800.0);
         let samples = (-24..=24)
             .map(|i| {
-                let dt = f64::from(i) * 150.0;
+                let dt = f64::from(i) * 300.0;
                 Ok((
                     dt,
                     sat.arc_at(time + dt).unwrap().evaluate(time + dt)?.position,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let fitted = orbit::fit_in_envelope(
+        let fitted = orbit::fit(
             &samples,
             toe,
             system,
             orbit::initial(&state, toe, system)?,
-            None,
+            false,
         )?;
         assert!(
-            fitted.rms <= 1.0,
+            fitted.sigma <= 1.0,
             "{} e{}: {}",
             fields[2],
             fields[3],
-            fitted.rms
+            fitted.sigma
         );
         let values = orbit::record_values(
             system,
@@ -75,7 +75,7 @@ fn fixture(name: &str) -> Result<Vec<u8>> {
 
 #[test]
 #[ignore = "requires the author's reviewed seed and broadcast snapshots"]
-fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
+fn reviewed_bds_geo_records_equal_huawei_set() -> Result<()> {
     use weinav_forge::{
         build,
         policy::{Flavor, Role},
@@ -117,10 +117,10 @@ fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
         {
             for bytes in &epoch.blocks[0] {
                 let values = record::decode(System::Bds, bytes)?;
-                let id = values["sv"] as u8 + 1;
-                if orbit::is_geo(System::Bds, id) {
+                if orbit::is_geo(System::Bds, &orbit::parameters(&values)?) {
+                    record::validate(System::Bds, &values)?;
                     record::validate_envelope(System::Bds, &values)?;
-                    cells.insert((id, index));
+                    cells.insert((values["sv"] as u8 + 1, index));
                 }
             }
         }
@@ -130,7 +130,11 @@ fn reviewed_bds_geo_records_are_shipped() -> Result<()> {
     let huawei = geo_cells(&fs::read(root.join("oracle/HW_PGNSS_BDS"))?)?;
     assert_eq!(huawei.len(), 139);
     let missing: Vec<_> = huawei.difference(&shipped).collect();
-    assert!(missing.is_empty(), "GEO records missing: {missing:?}");
+    let extra: Vec<_> = shipped.difference(&huawei).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "GEO records missing: {missing:?}, extra: {extra:?}"
+    );
     Ok(())
 }
 

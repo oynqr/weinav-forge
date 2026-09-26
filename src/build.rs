@@ -319,7 +319,7 @@ pub struct EpochReport {
     pub actual_clock_providers: Vec<String>,
     pub source_hashes: Vec<String>,
     pub counts: Vec<usize>,
-    pub fit_rms_max_m: f64,
+    pub fit_sigma_max_m: f64,
     pub quantized_rms_max_m: f64,
     pub clock_alignment_ns: Option<f64>,
     pub removals: Vec<String>,
@@ -356,39 +356,25 @@ fn kepler(
 ) -> Result<(Vec<u8>, f64, f64)> {
     let toe = (time - if system == System::Bds { 14.0 } else { 0.0 }).rem_euclid(604800.0);
     let center = inputs.state(system, id, time, provider)?;
-    let geo = orbit::is_geo(system, id);
+    let start = orbit::initial(&center, toe, system)?;
+    let geo = orbit::is_geo(system, &start);
     let start = if geo {
         orbit::initial_geo(&center, toe)?
     } else {
-        orbit::initial(&center, toe, system)?
+        start
     };
     let samples: Vec<_> = (-24..=24)
         .map(|i| {
-            let dt = f64::from(i) * 150.0;
+            let dt = f64::from(i) * 300.0;
             Ok((dt, inputs.state(system, id, time + dt, provider)?))
         })
         .collect::<Result<_>>()?;
     let positions: Vec<_> = samples.iter().map(|(dt, s)| (*dt, s.position)).collect();
-    let pinned = if system == System::Qzs {
-        let wide: Vec<_> = (-24..=24)
-            .map(|i| {
-                let dt = f64::from(i) * 300.0;
-                Ok((dt, inputs.state(system, id, time + dt, provider)?.position))
-            })
-            .collect::<Result<_>>()?;
-        Some(orbit::fit(&wide, toe, system, start, None)?.parameters[6])
-    } else {
-        None
-    };
-    let fit = if geo {
-        orbit::fit_geo(&positions, toe, start)?
-    } else {
-        orbit::fit_in_envelope(&positions, toe, system, start, pinned)?
-    };
+    let fit = orbit::fit(&positions, toe, system, start, geo)?;
     ensure!(
-        fit.rms <= fit_limit,
-        "fit RMS {:.3} m exceeds limit",
-        fit.rms
+        fit.sigma <= fit_limit,
+        "fit sigma {:.3} m exceeds limit",
+        fit.sigma
     );
     let delay = if provider == "hiee" {
         [inputs.satellites[&system][&id].tgd, 0.0]
@@ -429,7 +415,7 @@ fn kepler(
         quantized <= fit_limit + 0.5,
         "quantized RMS {quantized:.3} m exceeds limit plus 0.5 m"
     );
-    Ok((bytes, fit.rms, quantized))
+    Ok((bytes, fit.sigma, quantized))
 }
 
 fn glonass(
@@ -614,7 +600,7 @@ pub fn assemble(
                     actual_clock_providers: inputs.provider_names(clock),
                     source_hashes: hashes,
                     counts: Vec::new(),
-                    fit_rms_max_m: 0.0,
+                    fit_sigma_max_m: 0.0,
                     quantized_rms_max_m: 0.0,
                     clock_alignment_ns: None,
                     removals: Vec::new(),
@@ -672,9 +658,9 @@ pub fn assemble(
                             }
                         };
                         match result {
-                            Ok((bytes, rms, quantized)) => {
+                            Ok((bytes, sigma, quantized)) => {
                                 records.push(bytes);
-                                report.fit_rms_max_m = report.fit_rms_max_m.max(rms);
+                                report.fit_sigma_max_m = report.fit_sigma_max_m.max(sigma);
                                 report.quantized_rms_max_m =
                                     report.quantized_rms_max_m.max(quantized);
                             }

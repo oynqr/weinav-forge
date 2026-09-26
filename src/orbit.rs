@@ -218,8 +218,10 @@ fn evaluate(orbit: &Orbit, dt: f64, toe: f64, geo: bool) -> Result<[f64; 3]> {
     }
 }
 
-pub fn is_geo(system: System, id: u8) -> bool {
-    system == System::Bds && (id <= 5 || id >= 59)
+pub fn is_geo(system: System, p: &Parameters) -> bool {
+    system == System::Bds
+        && (40.0e6..44.5e6).contains(&(p[0] * p[0]))
+        && p[2].abs() < 10_f64.to_radians()
 }
 
 fn geo_frame([x, y, z]: [f64; 3], dt: f64) -> [f64; 3] {
@@ -318,14 +320,8 @@ fn from_regular(u: Parameters) -> Parameters {
     p
 }
 
-fn jacobian(
-    samples: &[Geometry],
-    orbit: &Orbit,
-    u: Parameters,
-    indices: &[usize],
-    level: Level,
-) -> DMatrix<f64> {
-    dispatch!(level, simd => jacobian_simd(simd, samples, orbit, u, indices))
+fn jacobian(samples: &[Geometry], orbit: &Orbit, u: Parameters, level: Level) -> DMatrix<f64> {
+    dispatch!(level, simd => jacobian_simd(simd, samples, orbit, u))
 }
 
 #[inline(always)]
@@ -334,14 +330,13 @@ fn jacobian_simd<S: Simd>(
     samples: &[Geometry],
     orbit: &Orbit,
     u: Parameters,
-    indices: &[usize],
 ) -> DMatrix<f64> {
     let [sqa, ecc, _, _, _, _, _, _, _, cuc, cus, cic, cis, crc, crs] = orbit.parameters;
     let a = orbit.semi_major;
     let unperturbed_motion = orbit.unperturbed_motion;
     let eccentricity_scale = orbit.eccentricity_scale;
     const PADDED_PARAMETERS: usize = PARAMETER_NAMES.len().next_power_of_two();
-    let mut j = DMatrix::zeros(samples.len() * 3, indices.len());
+    let mut j = DMatrix::zeros(samples.len() * 3, PARAMETER_NAMES.len());
     for (
         sample_index,
         &Geometry {
@@ -418,7 +413,7 @@ fn jacobian_simd<S: Simd>(
                 value.store_slice(&mut derivatives[axis][offset..offset + S::f64s::LEN]);
             }
         }
-        for (column, &index) in indices.iter().enumerate() {
+        for index in 0..PARAMETER_NAMES.len() {
             for axis in 0..3 {
                 let derivative = match index {
                     1 => {
@@ -431,7 +426,7 @@ fn jacobian_simd<S: Simd>(
                     }
                     _ => derivatives[axis][index],
                 };
-                j[(sample_index * 3 + axis, column)] = -derivative;
+                j[(sample_index * 3 + axis, index)] = -derivative;
             }
         }
     }
@@ -440,7 +435,7 @@ fn jacobian_simd<S: Simd>(
 
 pub struct Fit {
     pub parameters: Parameters,
-    pub rms: f64,
+    pub sigma: f64,
     pub iterations: usize,
 }
 
@@ -449,59 +444,6 @@ pub fn fit(
     toe: f64,
     system: System,
     start: Parameters,
-    pinned_dn: Option<f64>,
-) -> Result<Fit> {
-    fit_bounded(samples, toe, system, start, pinned_dn, &[], false)
-}
-
-pub fn fit_in_envelope(
-    samples: &[(f64, [f64; 3])],
-    toe: f64,
-    system: System,
-    start: Parameters,
-    pinned_dn: Option<f64>,
-) -> Result<Fit> {
-    fit_envelope(samples, toe, system, start, pinned_dn, false)
-}
-
-pub fn fit_geo(samples: &[(f64, [f64; 3])], toe: f64, start: Parameters) -> Result<Fit> {
-    fit_envelope(samples, toe, System::Bds, start, None, true)
-}
-
-fn fit_envelope(
-    samples: &[(f64, [f64; 3])],
-    toe: f64,
-    system: System,
-    start: Parameters,
-    pinned_dn: Option<f64>,
-    geo: bool,
-) -> Result<Fit> {
-    let free = fit_bounded(samples, toe, system, start, pinned_dn, &[], geo)?;
-    let bounds = record::fit_bounds(system);
-    if bounds
-        .iter()
-        .all(|&(index, low, high)| (low..=high).contains(&free.parameters[index]))
-    {
-        return Ok(free);
-    }
-    fit_bounded(
-        samples,
-        toe,
-        system,
-        free.parameters,
-        pinned_dn,
-        &bounds,
-        geo,
-    )
-}
-
-fn fit_bounded(
-    samples: &[(f64, [f64; 3])],
-    toe: f64,
-    system: System,
-    start: Parameters,
-    pinned_dn: Option<f64>,
-    bounds: &[(usize, f64, f64)],
     geo: bool,
 ) -> Result<Fit> {
     ensure!(samples.len() >= 9, "not enough samples to fit orbit");
@@ -512,7 +454,6 @@ fn fit_bounded(
             .collect::<Vec<_>>()
     });
     let samples = transformed.as_deref().unwrap_or(samples);
-    let indices: Vec<usize> = (0..15).filter(|&j| j != 6 || pinned_dn.is_none()).collect();
     let steps: [f64; 15] = [
         1e-5, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1e-13, 1e-13, 1e-13, 1e-9, 1e-9, 1e-9, 1e-9, 1e-4, 1e-4,
     ];
@@ -538,12 +479,6 @@ fn fit_bounded(
         Ok((values, orbit, geometry))
     };
     let mut u = to_regular(start);
-    for &(index, low, high) in bounds {
-        u[index] = u[index].clamp(low, high);
-    }
-    if let Some(dn) = pinned_dn {
-        u[6] = dn;
-    }
     let (mut r, mut orbit, mut geometry) = residual(from_regular(u), None)?;
     let mut score = r.norm_squared();
     const MIN_DAMPING: f64 = 1e-12;
@@ -554,10 +489,10 @@ fn fit_bounded(
         iterations = iteration + 1;
         let minimum_analytic_eccentricity = 1e-6;
         let mut j = if u[1].hypot(u[4]) >= minimum_analytic_eccentricity {
-            jacobian(&geometry, &orbit, u, &indices, simd_level)
+            jacobian(&geometry, &orbit, u, simd_level)
         } else {
-            let mut j = DMatrix::zeros(r.len(), indices.len());
-            for (column, &index) in indices.iter().enumerate() {
+            let mut j = DMatrix::zeros(r.len(), PARAMETER_NAMES.len());
+            for index in 0..PARAMETER_NAMES.len() {
                 let h = steps[index].max(u[index].abs() * 1e-7);
                 let mut a = u;
                 a[index] += h;
@@ -566,7 +501,7 @@ fn fit_bounded(
                 let derivative = (residual(from_regular(a), Some(&geometry))?.0
                     - residual(from_regular(b), Some(&geometry))?.0)
                     / (2.0 * h);
-                j.set_column(column, &derivative);
+                j.set_column(index, &derivative);
             }
             j
         };
@@ -577,25 +512,13 @@ fn fit_bounded(
             j.column_mut(i).scale_mut(1.0 / norm);
         }
         let transposed = j.transpose();
-        let mut normal = &transposed * &j;
-        let mut gradient = transposed * &r;
-        for &(index, low, high) in bounds {
-            let Some(column) = indices.iter().position(|&i| i == index) else {
-                continue;
-            };
-            if u[index] <= low && gradient[column] >= 0.0
-                || u[index] >= high && gradient[column] <= 0.0
-            {
-                normal.row_mut(column).fill(0.0);
-                normal.column_mut(column).fill(0.0);
-                gradient[column] = 0.0;
-            }
-        }
+        let normal = &transposed * &j;
+        let gradient = transposed * &r;
         let mut improvement = false;
         let before = score;
         for _ in 0..20 {
             let mut damped = normal.clone();
-            for i in 0..indices.len() {
+            for i in 0..PARAMETER_NAMES.len() {
                 damped[(i, i)] += damping;
             }
             let Some(delta) = damped.lu().solve(&(-&gradient)) else {
@@ -603,11 +526,8 @@ fn fit_bounded(
                 continue;
             };
             let mut next = u;
-            for (i, &index) in indices.iter().enumerate() {
-                next[index] += delta[i] / norms[i];
-            }
-            for &(index, low, high) in bounds {
-                next[index] = next[index].clamp(low, high);
+            for (index, value) in next.iter_mut().enumerate() {
+                *value += delta[index] / norms[index];
             }
             let parameters = from_regular(next);
             if parameters
@@ -644,7 +564,7 @@ fn fit_bounded(
     }
     Ok(Fit {
         parameters: from_regular(u),
-        rms: (score / samples.len() as f64).sqrt(),
+        sigma: (score / (3 * samples.len() - 15) as f64).sqrt(),
         iterations,
     })
 }
@@ -737,7 +657,7 @@ mod tests {
         let toe = 604_000.0;
         let samples = (-24..=24)
             .map(|i| {
-                let dt = f64::from(i) * 150.0;
+                let dt = f64::from(i) * 300.0;
                 Ok((dt, position(&p, dt, toe, system, true)?))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -750,9 +670,9 @@ mod tests {
             clock: 0.0,
             drift: 0.0,
         };
-        let fitted = fit_geo(&samples, toe, initial_geo(&state, toe)?)?;
-        assert!(fitted.rms < 0.01, "{}", fitted.rms);
-        for dt in [-3525.0, -75.0, 1725.0, 3525.0] {
+        let fitted = fit(&samples, toe, system, initial_geo(&state, toe)?, true)?;
+        assert!(fitted.sigma < 0.01, "{}", fitted.sigma);
+        for dt in [-7050.0, -75.0, 1725.0, 7050.0] {
             let expected = Vector3::from(position(&p, dt, toe, system, true)?);
             let actual = Vector3::from(position(&fitted.parameters, dt, toe, system, true)?);
             assert!((actual - expected).norm() < 0.01);
@@ -761,47 +681,47 @@ mod tests {
     }
 
     #[test]
-    fn bounded_refit_recovers_orbits_outside_the_harmonic_envelope() -> Result<()> {
-        for system in [System::Gps, System::Galileo, System::Bds] {
-            for index in [11, 12] {
-                for upper in [false, true] {
-                    let mut truth = [
-                        5153.7, 0.001, 0.96, 1.2, -0.7, 0.4, 2.1e-9, -7.3e-9, 3e-10, 1.4e-6,
-                        -2.2e-6, 8e-8, -6e-8, 210.0, -140.0,
-                    ];
-                    if system == System::Galileo {
-                        truth[0] = 5440.6;
-                    }
-                    let bounds = record::fit_bounds(system);
-                    let &(_, low, high) = bounds.iter().find(|b| b.0 == index).unwrap();
-                    truth[index] = if upper { high + 6e-7 } else { low - 6e-7 };
-                    let toe = 230_400.0;
-                    let samples = (-24..=24)
-                        .map(|i| {
-                            let dt = f64::from(i) * 150.0;
-                            Ok((dt, position(&truth, dt, toe, system, false)?))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let mut clipped = truth;
-                    clipped[index] = clipped[index].clamp(low, high);
-                    let clipped_rms = (samples
-                        .iter()
-                        .map(|&(dt, xyz)| {
-                            let p = position(&clipped, dt, toe, system, false).unwrap();
-                            (0..3)
-                                .map(|axis| (p[axis] - xyz[axis]).powi(2))
-                                .sum::<f64>()
-                        })
-                        .sum::<f64>()
-                        / samples.len() as f64)
-                        .sqrt();
-                    let fitted = fit_in_envelope(&samples, toe, system, truth, None)?;
-                    assert!(fitted.rms < 1.0, "{system:?} {index}: {}", fitted.rms);
-                    assert!(fitted.rms < clipped_rms / 5.0);
-                    for &(index, low, high) in &bounds {
-                        assert!((low..=high).contains(&fitted.parameters[index]));
-                    }
-                }
+    fn geostationary_orbits_are_recognised_from_their_elements() {
+        let mut p = [0.0; 15];
+        for (system, sqrt_a, inclination, geo) in [
+            (System::Bds, 6493.0, 0.03, true),
+            (System::Bds, 6493.0, 0.16, true),
+            (System::Bds, 6493.0, 0.96, false),
+            (System::Bds, 5282.6, 0.03, false),
+            (System::Qzs, 6493.0, 0.03, false),
+        ] {
+            p[0] = sqrt_a;
+            p[2] = inclination;
+            assert_eq!(is_geo(system, &p), geo, "{system:?} {sqrt_a} {inclination}");
+        }
+    }
+
+    #[test]
+    fn free_fit_keeps_elements_outside_the_field_range() -> Result<()> {
+        for system in [System::Gps, System::Bds, System::Qzs] {
+            for (index, value) in [(6, 5e-9), (11, 3.2e-5), (14, -1100.0)] {
+                let mut truth = [
+                    5153.7, 0.001, 0.96, 1.2, -0.7, 0.4, 2.1e-9, -7.3e-9, 3e-10, 1.4e-6, -2.2e-6,
+                    8e-8, -6e-8, 210.0, -140.0,
+                ];
+                truth[index] = value;
+                let toe = 230_400.0;
+                let samples = (-24..=24)
+                    .map(|i| {
+                        let dt = f64::from(i) * 300.0;
+                        Ok((dt, position(&truth, dt, toe, system, false)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut start = truth;
+                start[index] = 0.0;
+                let fitted = fit(&samples, toe, system, start, false)?;
+                assert!(fitted.sigma < 0.01, "{system:?} {index}: {}", fitted.sigma);
+                let error = (fitted.parameters[index] - value).abs() / value.abs();
+                assert!(
+                    error < 1e-3,
+                    "{system:?} {index}: {}",
+                    fitted.parameters[index]
+                );
             }
         }
         Ok(())
@@ -837,7 +757,7 @@ mod tests {
                 };
                 let samples = (-24..=24)
                     .map(|index| {
-                        let dt = f64::from(index) * 150.0;
+                        let dt = f64::from(index) * 300.0;
                         Ok((dt, observed(dt)?))
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -847,14 +767,13 @@ mod tests {
                     start[2] += displacement * 1e-3;
                     start[3] -= displacement * 1e-3;
                     start[5] += displacement * 1e-3;
-                    let pinned = (system == System::Qzs).then_some(parameters[6]);
-                    let fitted = fit(&samples, toe, system, start, pinned)?;
+                    let fitted = fit(&samples, toe, system, start, false)?;
                     assert!(
-                        fitted.rms < 0.02,
-                        "{system:?}, eccentricity {eccentricity}, displacement {displacement}: RMS {}",
-                        fitted.rms
+                        fitted.sigma < 0.02,
+                        "{system:?}, eccentricity {eccentricity}, displacement {displacement}: sigma {}",
+                        fitted.sigma
                     );
-                    for dt in [-3525.0, -1725.0, 75.0, 1875.0, 3525.0] {
+                    for dt in [-7050.0, -3525.0, 75.0, 3675.0, 7050.0] {
                         let expected = Vector3::from(observed(dt)?);
                         let actual =
                             Vector3::from(position(&fitted.parameters, dt, toe, system, false)?);
@@ -950,7 +869,6 @@ mod tests {
 
     #[test]
     fn analytic_jacobian_matches_central_differences() -> Result<()> {
-        let indices: Vec<_> = (0..15).collect();
         let samples: Vec<_> = [-7200.0, -3600.0, 0.0, 3600.0, 7200.0]
             .into_iter()
             .map(|dt| (dt, [0.0; 3]))
@@ -972,18 +890,12 @@ mod tests {
                     .iter()
                     .map(|&(dt, _)| orbit.geometry(dt, toe, false, None))
                     .collect();
-                let analytic = jacobian(&geometry, &orbit, u, &indices, Level::new());
-                let pinned_indices: Vec<_> = (0..15).filter(|&i| i != 6).collect();
+                let analytic = jacobian(&geometry, &orbit, u, Level::new());
                 for level in simd_levels() {
                     assert_eq!(
-                        jacobian(&geometry, &orbit, u, &indices, level),
+                        jacobian(&geometry, &orbit, u, level),
                         analytic,
                         "{level:?}: Jacobian differs"
-                    );
-                    assert_eq!(
-                        jacobian(&geometry, &orbit, u, &pinned_indices, level),
-                        analytic.clone().remove_column(6),
-                        "{level:?}: pinned Jacobian differs"
                     );
                 }
                 for (column, &h) in steps.iter().enumerate() {
@@ -1011,29 +923,24 @@ mod tests {
     }
 
     #[test]
-    fn fits_circular_orbits_and_preserves_pinned_mean_motion() -> Result<()> {
+    fn fits_circular_orbits() -> Result<()> {
         for ecc in [0.0, 1e-8, 1e-6, 0.1] {
-            for pinned in [None, Some(2.1e-9)] {
-                let p = [
-                    6493.0, ecc, 0.7, 1.2, -0.7, 0.4, 2.1e-9, -2.3e-9, 3e-10, 1.4e-6, -2.2e-6,
-                    8e-8, -6e-8, 210.0, -140.0,
-                ];
-                let toe = 230_400.0;
-                let samples = (-24..=24)
-                    .map(|i| {
-                        let dt = f64::from(i) * 300.0;
-                        Ok((dt, position(&p, dt, toe, System::Qzs, false)?))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let mut start = p;
-                start[0] += 0.01;
-                start[5] += 1e-5;
-                let fitted = fit(&samples, toe, System::Qzs, start, pinned)?;
-                assert!(fitted.rms < 0.01, "eccentricity {ecc}: {}", fitted.rms);
-                if let Some(dn) = pinned {
-                    assert_eq!(fitted.parameters[6], dn);
-                }
-            }
+            let p = [
+                6493.0, ecc, 0.7, 1.2, -0.7, 0.4, 2.1e-9, -2.3e-9, 3e-10, 1.4e-6, -2.2e-6, 8e-8,
+                -6e-8, 210.0, -140.0,
+            ];
+            let toe = 230_400.0;
+            let samples = (-24..=24)
+                .map(|i| {
+                    let dt = f64::from(i) * 300.0;
+                    Ok((dt, position(&p, dt, toe, System::Qzs, false)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut start = p;
+            start[0] += 0.01;
+            start[5] += 1e-5;
+            let fitted = fit(&samples, toe, System::Qzs, start, false)?;
+            assert!(fitted.sigma < 0.01, "eccentricity {ecc}: {}", fitted.sigma);
         }
         Ok(())
     }
@@ -1048,7 +955,7 @@ mod tests {
             let toe = 230_400.0;
             let samples: Vec<_> = (-24..=24)
                 .map(|i| {
-                    let dt = f64::from(i) * 150.0;
+                    let dt = f64::from(i) * 300.0;
                     Ok((dt, position(&p, dt, toe, system, false)?))
                 })
                 .collect::<Result<_>>()?;
@@ -1061,10 +968,10 @@ mod tests {
                 clock: 0.0,
                 drift: 0.0,
             };
-            let fit = fit(&samples, toe, system, initial(&state, toe, system)?, None)?;
-            assert!(fit.rms < 0.01, "{system:?}: RMS {}", fit.rms);
+            let fit = fit(&samples, toe, system, initial(&state, toe, system)?, false)?;
+            assert!(fit.sigma < 0.01, "{system:?}: sigma {}", fit.sigma);
             assert!(fit.parameters[1] >= 0.0 && fit.parameters[1] < 1.0);
-            for dt in [-3525.0, -1725.0, 75.0, 1875.0, 3525.0] {
+            for dt in [-7050.0, -3525.0, 75.0, 3675.0, 7050.0] {
                 let expected = Vector3::from(position(&p, dt, toe, system, false)?);
                 let actual = Vector3::from(position(&fit.parameters, dt, toe, system, false)?);
                 assert!((actual - expected).norm() < 0.01);
