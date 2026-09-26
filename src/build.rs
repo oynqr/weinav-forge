@@ -755,10 +755,10 @@ mod tests {
         text.into_bytes()
     }
 
-    fn prediction(clock: f64) -> Vec<u8> {
+    fn prediction(clock: f64, first_minute: i32, steps: i32) -> Vec<u8> {
         let mut text = String::from("#dP\n");
-        for step in 0..25 {
-            let minutes = 23 * 60 + step * 5;
+        for step in 0..steps {
+            let minutes = first_minute + step * 5;
             let day = 24 + minutes / (24 * 60);
             let minutes = minutes % (24 * 60);
             text.push_str(&format!(
@@ -806,6 +806,30 @@ mod tests {
     }
 
     #[test]
+    fn prediction_ending_inside_the_fit_window_does_not_cover_the_record() -> Result<()> {
+        let mut inputs = Inputs::default();
+        inputs.broadcast.add(&broadcast(1e-4, 5e-9))?;
+        inputs.health.add(&broadcast(1e-4, 5e-9))?;
+        inputs
+            .predictions
+            .entry(Role::BdsPrediction)
+            .or_default()
+            .add(&prediction(0.0, 20 * 60, 97))?;
+        let at = Instant::parse("2026-09-25T00:00:00Z")?;
+        let (start, end) = inputs.predictions[&Role::BdsPrediction]
+            .window((System::Bds, 6))
+            .context("prediction window")?;
+        let width = horizon_width(System::Bds);
+        let covered =
+            |time: f64| inputs.covers(System::Bds, "wum-nrt", time - width, time + width, at);
+        assert!(covered(start + width));
+        for end_after_record in [3600.0, 5400.0, 7199.0] {
+            assert!(!covered(end - end_after_record), "{end_after_record}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn bds_prediction_clocks_align_to_broadcast_without_a_seed() -> Result<()> {
         let (af0, tgd1, common_mode) = (1e-4, 5e-9, -24.76e-9);
         let mut inputs = Inputs::default();
@@ -814,7 +838,11 @@ mod tests {
             .predictions
             .entry(Role::BdsPrediction)
             .or_default()
-            .add(&prediction(af0 - bds_b3_clock_shift(tgd1) + common_mode))?;
+            .add(&prediction(
+                af0 - bds_b3_clock_shift(tgd1) + common_mode,
+                23 * 60,
+                25,
+            ))?;
         inputs.antex = Some(Antex::parse(&antex())?);
         let at = Instant::parse("2026-09-25T00:00:00Z")?;
         let alignment = inputs
