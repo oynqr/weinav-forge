@@ -8,7 +8,7 @@ use crate::{
     sp3::{Antex, Sp3},
     time::Instant,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::{
@@ -232,6 +232,56 @@ impl Inputs {
                     .is_some_and(|(a, b)| a <= start && b >= end)
             })
     }
+
+    fn clock_alignment(
+        &self,
+        system: System,
+        provider: &str,
+        time: f64,
+        at: Instant,
+    ) -> Result<Option<f64>> {
+        if system != System::Bds || Self::role(provider) != Some(Role::BdsPrediction) {
+            return Ok(None);
+        }
+        let build_time = at.gps() as f64;
+        let reference_time = if self.seed.is_some() {
+            time
+        } else {
+            build_time
+        };
+        let mut offsets: Vec<f64> = self
+            .ids(system, provider)
+            .into_iter()
+            .filter_map(|id| {
+                let reference = if self.seed.is_some() {
+                    self.seed_state(system, id, reference_time).ok()?.clock
+                } else {
+                    let nav = self.broadcast.nearest(system, id, reference_time)?;
+                    nav.healthy().then_some(())?;
+                    nav.state(reference_time).ok()?.clock
+                };
+                let tgd1 = self
+                    .broadcast
+                    .nearest(system, id, build_time)?
+                    .get("tgd1")
+                    .ok()?;
+                let candidate = self.state(system, id, reference_time, provider).ok()?.clock
+                    + bds_b3_clock_shift(tgd1);
+                Some(reference - candidate)
+            })
+            .collect();
+        ensure!(
+            !offsets.is_empty(),
+            "no common BeiDou clocks to align {provider}"
+        );
+        offsets.sort_by(f64::total_cmp);
+        Ok(Some(offsets[offsets.len() / 2]))
+    }
+}
+
+fn bds_b3_clock_shift(tgd1: f64) -> f64 {
+    let gamma = (1561.098_f64 / 1268.52).powi(2);
+    gamma / (gamma - 1.0) * tgd1
 }
 
 #[derive(Serialize)]
@@ -246,6 +296,7 @@ pub struct EpochReport {
     pub counts: Vec<usize>,
     pub fit_rms_max_m: f64,
     pub quantized_rms_max_m: f64,
+    pub clock_alignment_ns: Option<f64>,
     pub removals: Vec<String>,
 }
 
@@ -274,7 +325,7 @@ fn kepler(
     system: System,
     id: u8,
     time: f64,
-    provider: &str,
+    (provider, clock_alignment): (&str, f64),
     fit_limit: f64,
     at: Instant,
 ) -> Result<(Vec<u8>, f64, f64)> {
@@ -332,9 +383,9 @@ fn kepler(
     };
     let mut clock = clock_fit(&samples)?;
     if system == System::Bds && provider != "hiee" {
-        let gamma = (1561.098_f64 / 1268.52).powi(2);
-        clock[0] += gamma / (gamma - 1.0) * delay[0];
+        clock[0] += bds_b3_clock_shift(delay[0]);
     }
+    clock[0] += clock_alignment;
     let values = orbit::record_values(system, id, time, &fit.parameters, clock, delay);
     let bytes = record::encode(system, &values)?;
     let values = record::decode(system, &bytes)?;
@@ -538,8 +589,13 @@ pub fn assemble(
                     counts: Vec::new(),
                     fit_rms_max_m: 0.0,
                     quantized_rms_max_m: 0.0,
+                    clock_alignment_ns: None,
                     removals: Vec::new(),
                 };
+                let alignment = inputs.clock_alignment(system, clock, time as f64, at);
+                if let Ok(Some(offset)) = alignment {
+                    report.clock_alignment_ns = Some(offset * 1e9);
+                }
                 let mut blocks = Vec::new();
                 let mut screened_ids = BTreeSet::new();
                 for id in inputs.ids(system, orbit) {
@@ -575,7 +631,18 @@ pub fn assemble(
                             glonass(inputs, id, time, block, orbit, clock, at)
                                 .map(|b| (b, 0.0, 0.0))
                         } else {
-                            kepler(inputs, system, id, time as f64, orbit, fit_limit, at)
+                            match &alignment {
+                                Ok(offset) => kepler(
+                                    inputs,
+                                    system,
+                                    id,
+                                    time as f64,
+                                    (orbit, offset.unwrap_or(0.0)),
+                                    fit_limit,
+                                    at,
+                                ),
+                                Err(e) => Err(anyhow!("{e:#}")),
+                            }
                         };
                         match result {
                             Ok((bytes, rms, quantized)) => {
@@ -612,4 +679,87 @@ pub fn assemble(
             .insert(name, record::container(system, &epochs)?);
     }
     Ok(product)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn broadcast(af0: f64, tgd1: f64) -> Vec<u8> {
+        let fields = [
+            0.0, 0.0, 4e-9, 1.0, 0.0, 1e-3, 0.0, 5282.6, 432_000.0, 0.0, 1.0, 0.0, 0.96, 0.0, 0.5,
+            -7e-9, 0.0, 0.0, 1082.0, 0.0, 2.0, 0.0, tgd1, 0.0, 432_000.0, 0.0, 0.0, 0.0,
+        ];
+        let mut text = format!(
+            "{:9}{:51}RINEX VERSION / TYPE\n{:60}END OF HEADER\nC06 2026 09 25 00 00 00{af0:19.12E}{:19.12E}{:19.12E}\n",
+            "3.05", "", "", 0.0, 0.0
+        );
+        for line in fields.chunks(4) {
+            text.push_str("    ");
+            for value in line {
+                text.push_str(&format!("{value:19.12E}"));
+            }
+            text.push('\n');
+        }
+        text.into_bytes()
+    }
+
+    fn prediction(clock: f64) -> Vec<u8> {
+        let mut text = String::from("#dP\n");
+        for step in 0..25 {
+            let minutes = 23 * 60 + step * 5;
+            let day = 24 + minutes / (24 * 60);
+            let minutes = minutes % (24 * 60);
+            text.push_str(&format!(
+                "* 2026 09 {day:02} {:02} {:02} 00.0\nPC06{:14.6}{:14.6}{:14.6}{:14.6}\n",
+                minutes / 60,
+                minutes % 60,
+                20_000.0,
+                10_000.0,
+                15_000.0,
+                clock * 1e6
+            ));
+        }
+        text.into_bytes()
+    }
+
+    fn antex() -> Vec<u8> {
+        [
+            (String::new(), "START OF ANTENNA"),
+            (format!("{:20}{:20}", "", "C06"), "TYPE / SERIAL NO"),
+            ("C02".into(), "START OF FREQUENCY"),
+            ("0 0 1000".into(), "NORTH / EAST / UP"),
+            ("C06".into(), "START OF FREQUENCY"),
+            ("0 0 1000".into(), "NORTH / EAST / UP"),
+            (String::new(), "END OF ANTENNA"),
+        ]
+        .into_iter()
+        .map(|(data, label)| format!("{data:60}{label}\n"))
+        .collect::<String>()
+        .into_bytes()
+    }
+
+    #[test]
+    fn bds_prediction_clocks_align_to_broadcast_without_a_seed() -> Result<()> {
+        let (af0, tgd1, common_mode) = (1e-4, 5e-9, -24.76e-9);
+        let mut inputs = Inputs::default();
+        inputs.broadcast.add(&broadcast(af0, tgd1))?;
+        inputs
+            .predictions
+            .entry(Role::BdsPrediction)
+            .or_default()
+            .add(&prediction(af0 - bds_b3_clock_shift(tgd1) + common_mode))?;
+        inputs.antex = Some(Antex::parse(&antex())?);
+        let at = Instant::parse("2026-09-25T00:00:00Z")?;
+        let alignment = inputs
+            .clock_alignment(System::Bds, "wum-nrt", 0.0, at)?
+            .context("alignment missing")?;
+        assert!((alignment + common_mode).abs() < 1e-11, "{alignment:e}");
+        assert_eq!(inputs.clock_alignment(System::Bds, "hiee", 0.0, at)?, None);
+        assert_eq!(
+            inputs.clock_alignment(System::Gps, "code5d", 0.0, at)?,
+            None
+        );
+        Ok(())
+    }
 }
