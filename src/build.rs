@@ -353,6 +353,22 @@ fn clock_fit(samples: &[(f64, State)]) -> Result<[f64; 3]> {
     Ok([solution[0], solution[1] / 3600.0, 0.0])
 }
 
+fn sample_offsets(system: System) -> Vec<f64> {
+    if system == System::Glonass {
+        (0..system.subblocks())
+            .map(|block| 900.0 * block as f64 - 3600.0)
+            .collect()
+    } else {
+        (-24..=24).map(|i| f64::from(i) * 300.0).collect()
+    }
+}
+
+fn horizon_width(system: System) -> f64 {
+    sample_offsets(system)
+        .into_iter()
+        .fold(0.0, |width, offset| width.max(offset.abs()))
+}
+
 fn kepler(
     inputs: &Inputs,
     system: System,
@@ -371,11 +387,9 @@ fn kepler(
     } else {
         start
     };
-    let samples: Vec<_> = (-24..=24)
-        .map(|i| {
-            let dt = f64::from(i) * 300.0;
-            Ok((dt, inputs.state(system, id, time + dt, provider)?))
-        })
+    let samples: Vec<_> = sample_offsets(system)
+        .into_iter()
+        .map(|dt| Ok((dt, inputs.state(system, id, time + dt, provider)?)))
         .collect::<Result<_>>()?;
     let positions: Vec<_> = samples.iter().map(|(dt, s)| (*dt, s.position)).collect();
     let fit = orbit::fit(&positions, toe, system, start, geo)?;
@@ -440,7 +454,7 @@ fn glonass(
         .as_ref()
         .map(|s| i64::from(s.leap))
         .unwrap_or(at.gps() - (at.0.timestamp() - crate::time::GPS_EPOCH_UNIX));
-    let time = (index + 900 * subblock as i64 - 3600 + leap) as f64;
+    let time = index as f64 + sample_offsets(System::Glonass)[subblock] + leap as f64;
     let state = inputs.state(System::Glonass, id, time, provider)?;
     let clock_state = if clock == provider {
         state.clone()
@@ -554,11 +568,7 @@ pub fn assemble(
             .grid(system)
             .into_iter()
             .map(|time| {
-                let width = if system == System::Qzs {
-                    7200.0
-                } else {
-                    3600.0
-                };
+                let width = horizon_width(system);
                 let orbit = if let Some(fallback) = policy.beyond_horizon {
                     if tail
                         || !inputs.covers(
@@ -761,6 +771,21 @@ mod tests {
         .map(|(data, label)| format!("{data:60}{label}\n"))
         .collect::<String>()
         .into_bytes()
+    }
+
+    #[test]
+    fn horizon_covers_every_sample_of_a_record() {
+        for system in System::ALL {
+            let width = horizon_width(system);
+            let expected = if system == System::Glonass {
+                3600.0
+            } else {
+                7200.0
+            };
+            assert_eq!(width, expected, "{system:?}");
+            assert!(sample_offsets(system).iter().all(|dt| dt.abs() <= width));
+        }
+        assert_eq!(sample_offsets(System::Gps).len(), 49);
     }
 
     #[test]

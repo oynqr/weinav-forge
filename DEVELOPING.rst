@@ -219,19 +219,20 @@ window of the partial EXTRA file starts at the 2-hour grid step that contains
 the build time and ends 75 hours later, so it brackets every shipped epoch.
 
 Each Kepler record is fitted to 49 positions from 2 hours before to 2 hours
-after the epoch, every 300 seconds, as Huawei's library does. The fit limit
-applies to the standard error, which divides the squared residuals by
-``3n - 15``. The builder never bounds or clamps a field. A record with a field
-outside its vendor range is removed, and the report lists it. Huawei omits the
-same BeiDou GEO and QZSS records. Fields are rounded to nearest, with ties away
-from zero. A BeiDou orbit near 42164 km with an inclination below 10 degrees is
-a GEO orbit and uses the extra rotation of the BeiDou ICD. BeiDou records use
-the GPS gravity constant, as Huawei's records do; broadcast evaluation keeps
-the ICD value. Records carry zero ``gamma_n`` and ``af2``, as genuine Huawei
-files do. BeiDou prediction clocks have a common offset that drifts against the
-seed. The builder removes the median offset against the seed in each epoch, or
-against broadcast when there is no seed, and reports it as
-``clock_alignment_ns``.
+after the epoch, every 300 seconds, as Huawei's library does. A prediction
+source is used for an epoch only when it covers all 49 positions; otherwise the
+epoch is past the source's horizon. The fit limit applies to the standard
+error, which divides the squared residuals by ``3n - 15``. The builder never
+bounds or clamps a field. A record with a field outside its vendor range is
+removed, and the report lists it. Huawei omits the same BeiDou GEO and QZSS
+records. Fields are rounded to nearest, with ties away from zero. A BeiDou
+orbit near 42164 km with an inclination below 10 degrees is a GEO orbit and
+uses the extra rotation of the BeiDou ICD. BeiDou records use the GPS gravity
+constant, as Huawei's records do; broadcast evaluation keeps the ICD value.
+Records carry zero ``gamma_n`` and ``af2``, as genuine Huawei files do. BeiDou
+prediction clocks have a common offset that drifts against the seed. The
+builder removes the median offset against the seed in each epoch, or against
+broadcast when there is no seed, and reports it as ``clock_alignment_ns``.
 
 The measured field envelopes in ``src/envelopes.rs`` are the ``env_min`` and
 ``env_max`` limits of the external gate's ``g2_envelopes.json``, multiplied by
