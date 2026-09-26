@@ -91,6 +91,98 @@ fn kepler_cells(system: System, container: &[u8]) -> Result<Cells> {
     Ok(cells)
 }
 
+type GlonassRecords = BTreeMap<(u8, usize, usize), Vec<u8>>;
+
+fn glonass_records(container: &[u8]) -> Result<GlonassRecords> {
+    let mut records = BTreeMap::new();
+    for (index, epoch) in record::parse_container(System::Glonass, container)?
+        .iter()
+        .enumerate()
+    {
+        for (block, bytes) in epoch.blocks.iter().enumerate() {
+            for bytes in bytes {
+                let slot = record::decode(System::Glonass, bytes)?["slot"] as u8 + 1;
+                records.insert((slot, index, block), bytes.clone());
+            }
+        }
+    }
+    Ok(records)
+}
+
+fn gps_node_drift_error(container: &[u8]) -> Result<f64> {
+    use std::f64::consts::PI;
+    const GM: f64 = 3.986005e14;
+    const EARTH_ROTATION: f64 = 7.2921151467e-5;
+    const WEEK: f64 = 604800.0;
+    const TOE_STEP: f64 = 16.0;
+    const NOMINAL_AXIS_KM: f64 = 26560.0;
+    const NOMINAL_INCLINATION_DEG: f64 = 55.0;
+    let wrap = |semicircles: f64| (semicircles + 1.0).rem_euclid(2.0) - 1.0;
+    let mut epochs = Vec::new();
+    for epoch in record::parse_container(System::Gps, container)? {
+        let mut satellites = BTreeMap::new();
+        for bytes in &epoch.blocks[0] {
+            let values = record::decode(System::Gps, bytes)?;
+            satellites.insert(values["sv"] as u8, values);
+        }
+        epochs.push((f64::from(epoch.time), satellites));
+    }
+    let (first, last) = (&epochs[0].1, &epochs[epochs.len() - 1].1);
+    let prns: Vec<_> = first.keys().filter(|p| last.contains_key(p)).collect();
+    anyhow::ensure!(
+        prns.len() >= 4,
+        "only {} satellites in every epoch",
+        prns.len()
+    );
+    let (mut advance_error, mut advance_bound, mut node_error) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut axis_change, mut inclination_change) = (0.0_f64, 0.0_f64);
+    for prn in prns {
+        for pair in epochs.windows(2) {
+            let ((ta, ra), (tb, rb)) = (&pair[0], &pair[1]);
+            let (Some(a), Some(b)) = (ra.get(prn), rb.get(prn)) else {
+                continue;
+            };
+            let axis = a["sqrt_a"].powi(2);
+            anyhow::ensure!(
+                (axis / 1000.0 - NOMINAL_AXIS_KM).abs() <= 0.02 * NOMINAL_AXIS_KM,
+                "G{prn} semi-major axis"
+            );
+            anyhow::ensure!(
+                ((a["i0"] * 180.0).abs() - NOMINAL_INCLINATION_DEG).abs() <= 5.0,
+                "G{prn} inclination"
+            );
+            anyhow::ensure!((0.0..0.05).contains(&a["ecc"]), "G{prn} eccentricity");
+            let motion = (GM / axis.powi(3)).sqrt();
+            let dt = tb - ta;
+            let expected = (motion * dt + PI).rem_euclid(2.0 * PI) - PI;
+            advance_bound = advance_bound.max(motion * TOE_STEP);
+            let advance = wrap((b["m0"] + b["omega"]) - (a["m0"] + a["omega"])) * PI;
+            advance_error = advance_error.max(wrap((advance - expected) / PI).abs() * PI);
+            let node = wrap(b["omega0"] - a["omega0"]) * PI;
+            let expected_node =
+                a["omegadot"] * PI * dt - EARTH_ROTATION * WEEK * (b["week"] - a["week"]);
+            node_error =
+                node_error.max(((node - expected_node + PI).rem_euclid(2.0 * PI) - PI).abs());
+            axis_change = axis_change.max((b["sqrt_a"] - a["sqrt_a"]).abs() / a["sqrt_a"]);
+            inclination_change = inclination_change.max((b["i0"] - a["i0"]).abs() / a["i0"].abs());
+        }
+    }
+    anyhow::ensure!(
+        advance_error <= advance_bound,
+        "argument of latitude error {advance_error:e} rad"
+    );
+    anyhow::ensure!(node_error <= 1e-5, "node drift error {node_error:e} rad");
+    anyhow::ensure!(
+        axis_change <= 1e-4,
+        "semi-major axis change {axis_change:e}"
+    );
+    anyhow::ensure!(
+        inclination_change <= 1e-3,
+        "inclination change {inclination_change:e}"
+    );
+    Ok(node_error)
+}
+
 fn geo(values: &BTreeMap<String, f64>) -> bool {
     orbit::is_geo(System::Bds, &orbit::parameters(values).unwrap())
 }
@@ -131,7 +223,7 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
             vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
         ),
     ]);
-    let systems = [System::Gps, System::Galileo, System::Bds, System::Qzs];
+    let systems = System::ALL;
     let cache = tempfile::tempdir()?;
     let inputs = build::Inputs::load(cache.path(), None, Flavor::Huawei, &systems, false, &local)?;
     let products = build::assemble(
@@ -142,7 +234,21 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
         Instant::parse("2026-09-26T05:43:07Z")?,
         1.0,
     )?;
-    for system in systems {
+    let ours = glonass_records(&products.files["HW_PGNSS_GLONASS"])?;
+    let mut huawei = glonass_records(&fs::read(root.join("oracle/HW_PGNSS_GLONASS"))?)?;
+    let unhealthy_in_broadcast = [13, 20];
+    huawei.retain(|(slot, _, _), _| !unhealthy_in_broadcast.contains(slot));
+    assert!(
+        ours == huawei,
+        "{} of {} GLONASS records",
+        ours.len(),
+        huawei.len()
+    );
+    let huawei_gps = fs::read(root.join("oracle/HW_PGNSS_GPS"))?;
+    gps_node_drift_error(&huawei_gps)?;
+    let node_error = gps_node_drift_error(&products.files["HW_PGNSS_GPS"])?;
+    assert!(node_error <= 1e-5, "{node_error:e}");
+    for system in [System::Gps, System::Galileo, System::Bds, System::Qzs] {
         let name = format!("HW_PGNSS_{}", system.name());
         let ours = kepler_cells(system, &products.files[&name])?;
         let huawei = kepler_cells(system, &fs::read(root.join("oracle").join(&name))?)?;
@@ -229,23 +335,8 @@ fn reviewed_satellites_flagged_at_build_time_match_huawei() -> Result<()> {
         let huawei = kepler_cells(system, &fs::read(run.join("oracle").join(&name))?)?;
         assert!(ours.keys().eq(huawei.keys()), "{system:?}");
     }
-    let records = |container: &[u8]| -> Result<BTreeMap<(u8, usize, usize), Vec<u8>>> {
-        let mut records = BTreeMap::new();
-        for (index, epoch) in record::parse_container(System::Glonass, container)?
-            .iter()
-            .enumerate()
-        {
-            for (block, bytes) in epoch.blocks.iter().enumerate() {
-                for bytes in bytes {
-                    let slot = record::decode(System::Glonass, bytes)?["slot"] as u8 + 1;
-                    records.insert((slot, index, block), bytes.clone());
-                }
-            }
-        }
-        Ok(records)
-    };
-    let ours = records(&products.files["HW_PGNSS_GLONASS"])?;
-    let mut huawei = records(&fs::read(run.join("oracle/HW_PGNSS_GLONASS"))?)?;
+    let ours = glonass_records(&products.files["HW_PGNSS_GLONASS"])?;
+    let mut huawei = glonass_records(&fs::read(run.join("oracle/HW_PGNSS_GLONASS"))?)?;
     let unhealthy_in_broadcast = 20;
     huawei.retain(|(slot, _, _), _| *slot != unhealthy_in_broadcast);
     assert!(ours.keys().any(|(slot, _, _)| *slot == 15));

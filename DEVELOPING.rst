@@ -52,7 +52,11 @@ measured envelope without bounds. They also compare a build with Huawei's
 output: the GPS, Galileo, BeiDou and QZSS files contain records for the same
 satellites and epochs as Huawei's, GPS records agree within 0.15 metre for 2
 hours on each side of the epoch, and no field is on its vendor limit unless
-Huawei's field is.
+Huawei's field is. GLONASS records are identical to Huawei's, except for
+satellites that broadcast marks unhealthy. The GPS file also passes the
+Keplerian motion checks of the external validator: the node drift error must
+be at most 1e-5 radian. A second build compares the same files at a time when
+the seed flags an arc of R15, C06 and C09.
 
 Processing performance
 ----------------------
