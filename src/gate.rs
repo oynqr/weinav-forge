@@ -401,7 +401,7 @@ pub fn inspect(
             result
                 .err()
                 .map(|e| e.to_string())
-                .unwrap_or_else(|| "all RTCM epochs within two hours".into()),
+                .unwrap_or_else(|| "every AGNSS ephemeris current at the build".into()),
         );
     } else {
         gate.skip("K4", "AGNSS", "AGNSS omitted by request");

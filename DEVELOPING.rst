@@ -250,12 +250,16 @@ a copy of this file next to the report only when the checks pass. Orbit
 screening, AGNSS and Klobuchar data use all broadcast files. The newest
 Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
-time, a BeiDou ``toe`` more than 90 minutes away, and a GPS or Galileo ``toe``
-more than 2 hours away, as the external gate does. For Huawei's AGNSS, only the
-Galileo time of week and the GLONASS time of day are checked, not the Galileo
-week or the GLONASS day number: on 26 September 2026 Huawei's stream carried
-the next Galileo week and, later, the next GLONASS day. The external gate reads
-neither. When the builder makes AGNSS from broadcast, it omits each GLONASS
+time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
+2 hours away, in absolute time, as the external gate does. It also refuses a
+Galileo ``toe`` more than 4 hours away, which the external gate does not check,
+and a stream without a GPS ephemeris. Huawei's Galileo week and GLONASS day
+number are unreliable: Huawei's stream has carried the next Galileo week, and
+a GLONASS day from 8 days behind to 1 day ahead. For Huawei's AGNSS, the check
+therefore accepts those two fields within these bounds, and the report notes
+each such message; the time of week and the time of day must still be
+current. The external gate reads neither field. When the builder makes AGNSS
+from broadcast, it omits each GLONASS
 ephemeris whose ``t_b`` is more than 30 minutes from the build time and notes
 the count, because BKG publishes each new ``t_b`` a few minutes late. Each
 build fetches the broadcast files again. The fetcher reuses a cached URL for at

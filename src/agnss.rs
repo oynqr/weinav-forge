@@ -159,6 +159,7 @@ fn age_limit(number: u16) -> f64 {
     match number {
         1020 => 1800.0,
         1042 => 5400.0,
+        1046 => 14400.0,
         _ => 7200.0,
     }
 }
@@ -219,63 +220,85 @@ pub fn build(
     Ok((out, notes))
 }
 
-pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result<()> {
+pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result<Vec<String>> {
+    let now = at.gps() as f64;
+    let moscow = at.0 + chrono::Duration::hours(3);
+    let mut gps = 0;
+    let mut weeks = BTreeMap::<i64, usize>::new();
+    let mut days = BTreeMap::<i64, usize>::new();
     for payload in rtcm::payloads(bytes)? {
         let m = Message::decode(payload)?;
-        let now = at.gps() as f64;
-        let dt = match m.number {
-            1019 | 1046 => {
-                (m.values["toe"] - now.rem_euclid(604800.0) + 302400.0).rem_euclid(604800.0)
-                    - 302400.0
-            }
-            1042 => {
-                (m.values["toe"] - (now - 14.0).rem_euclid(604800.0) + 302400.0)
+        let limit = age_limit(m.number);
+        match m.number {
+            1019 | 1042 | 1046 => {
+                let (offset, modulus, lag) = match m.number {
+                    1019 => (0.0, 1024.0, 0.0),
+                    1046 => (1024.0, 4096.0, 0.0),
+                    _ => (1356.0, 8192.0, 14.0),
+                };
+                let system_now = now - lag;
+                let dt = (m.values["toe"] - system_now.rem_euclid(604800.0) + 302400.0)
                     .rem_euclid(604800.0)
-                    - 302400.0
+                    - 302400.0;
+                ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
+                let week = ((system_now + dt) / 604800.0).floor() - offset;
+                let difference =
+                    (m.values["week"] - week + modulus / 2.0).rem_euclid(modulus) - modulus / 2.0;
+                if m.number == 1046 && !absolute_dates {
+                    ensure!(
+                        difference == 0.0 || difference == 1.0,
+                        "AGNSS Galileo week {difference:+} from its time of week"
+                    );
+                    if difference != 0.0 {
+                        *weeks.entry(difference as i64).or_default() += 1;
+                    }
+                } else {
+                    ensure!(
+                        difference == 0.0,
+                        "stale AGNSS week in message {}",
+                        m.number
+                    );
+                }
+                gps += usize::from(m.number == 1019);
             }
             1020 => {
-                (m.values["tb"]
-                    - f64::from((at.0 + chrono::Duration::hours(3)).num_seconds_from_midnight())
-                    + 43200.0)
+                ensure!(m.values["tb"] <= 95.0 * 900.0, "GLONASS t_b beyond slot 95");
+                let dt = (m.values["tb"] - f64::from(moscow.num_seconds_from_midnight()) + 43200.0)
                     .rem_euclid(86400.0)
-                    - 43200.0
+                    - 43200.0;
+                ensure!(dt.abs() <= limit, "stale AGNSS message 1020");
+                let date = (moscow + chrono::Duration::seconds(dt as i64)).date_naive();
+                let base =
+                    chrono::NaiveDate::from_ymd_opt(1996 + 4 * (m.values["n4"] as i32 - 1), 1, 1)
+                        .context("invalid RTCM GLONASS cycle")?;
+                let difference =
+                    (base + chrono::Duration::days(m.values["nt"] as i64 - 1) - date).num_days();
+                if absolute_dates {
+                    ensure!(difference == 0, "stale GLONASS RTCM day");
+                } else {
+                    ensure!(
+                        (-8..=1).contains(&difference),
+                        "AGNSS GLONASS day {difference:+} from its time of day"
+                    );
+                    if difference != 0 {
+                        *days.entry(difference).or_default() += 1;
+                    }
+                }
             }
-            _ => continue,
-        };
-        let limit = age_limit(m.number);
-        ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
-        if m.number == 1019 || (m.number == 1046 && absolute_dates) || m.number == 1042 {
-            let (offset, modulus) = match m.number {
-                1019 => (0.0, 1024.0),
-                1046 => (1024.0, 4096.0),
-                _ => (1356.0, 8192.0),
-            };
-            let current_week =
-                ((now - if m.number == 1042 { 14.0 } else { 0.0 }) / 604800.0).floor() - offset;
-            let week = m.values["week"];
-            let difference =
-                (week - current_week + modulus / 2.0).rem_euclid(modulus) - modulus / 2.0;
-            let system_now = now - if m.number == 1042 { 14.0 } else { 0.0 };
-            ensure!(
-                (difference * 604800.0 + m.values["toe"] - system_now.rem_euclid(604800.0)).abs()
-                    <= limit,
-                "stale AGNSS week or epoch"
-            );
-        } else if m.number == 1020 && absolute_dates {
-            let base_year = 1996 + 4 * (m.values["n4"] as i32 - 1);
-            let base = Utc
-                .with_ymd_and_hms(base_year, 1, 1, 0, 0, 0)
-                .single()
-                .context("invalid RTCM GLONASS cycle")?;
-            let epoch = base
-                + chrono::Duration::days(m.values["nt"] as i64 - 1)
-                + chrono::Duration::seconds(m.values["tb"] as i64)
-                - chrono::Duration::hours(3);
-            ensure!(
-                (epoch - at.0).num_seconds().abs() as f64 <= limit,
-                "stale GLONASS RTCM day"
-            );
+            _ => {}
         }
     }
-    Ok(())
+    ensure!(gps > 0, "no GPS ephemeris (1019) in AGNSS");
+    let mut notes = Vec::new();
+    for (difference, count) in weeks {
+        notes.push(format!(
+            "AGNSS: {count} Galileo ephemerides carry a week {difference:+} from their time of week"
+        ));
+    }
+    for (difference, count) in days {
+        notes.push(format!(
+            "AGNSS: {count} GLONASS ephemerides carry a day {difference:+} from their time of day"
+        ));
+    }
+    Ok(notes)
 }

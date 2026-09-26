@@ -200,22 +200,59 @@ fn reviewed_huawei_agnss_is_not_refused_for_its_dates() -> Result<()> {
     let bytes =
         fs::read(root.join("x/huawei/659dea01-0fbb-41e4-8876-e5eb5eeecc95/HW_AGNSS_RTCM_33"))?;
     let at = Instant::parse("2026-09-26T05:43:07Z")?;
-    agnss::validate_fresh(&bytes, at, true)?;
-    for (number, field) in [(1046, "week"), (1020, "nt")] {
-        let mut shifted = Vec::new();
+    type FieldChange = (u16, &'static str, fn(f64) -> f64);
+    let edit = |number: u16, field: &str, change: fn(f64) -> f64| -> Result<Vec<u8>> {
+        let mut edited = Vec::new();
         for payload in rtcm::payloads(&bytes)? {
             let mut message = rtcm::Message::decode(payload)?;
             if message.number == number {
-                *message.values.get_mut(field).context("date field")? += 1.0;
+                let value = message.values.get_mut(field).context("edited field")?;
+                *value = change(*value);
             }
-            shifted.extend(rtcm::frame(&message.encode()?)?);
+            edited.extend(rtcm::frame(&message.encode()?)?);
         }
-        agnss::validate_fresh(&shifted, at, false)?;
+        Ok(edited)
+    };
+    assert!(agnss::validate_fresh(&bytes, at, true)?.is_empty());
+    let observed: [FieldChange; 3] = [
+        (1046, "week", |v| v + 1.0),
+        (1020, "nt", |v| v + 1.0),
+        (1020, "nt", |v| v - 8.0),
+    ];
+    for (number, field, change) in observed {
+        let edited = edit(number, field, change)?;
+        let notes = agnss::validate_fresh(&edited, at, false)?;
+        assert_eq!(notes.len(), 1, "{number} {field}: {notes:?}");
         assert!(
-            agnss::validate_fresh(&shifted, at, true).is_err(),
-            "{number}"
+            agnss::validate_fresh(&edited, at, true).is_err(),
+            "{number} {field}"
         );
     }
+    let refused: [FieldChange; 10] = [
+        (1046, "week", |v| v + 2.0),
+        (1046, "week", |v| v - 1.0),
+        (1020, "nt", |v| v + 2.0),
+        (1020, "nt", |v| v - 9.0),
+        (1020, "n4", |v| v - 1.0),
+        (1046, "toe", |v| v - 5.0 * 3600.0),
+        (1020, "tb", |v| v - 2700.0),
+        (1020, "tb", |_| 127.0 * 900.0),
+        (1019, "week", |v| v - 1.0),
+        (1042, "week", |v| v - 1.0),
+    ];
+    for (number, field, change) in refused {
+        assert!(
+            agnss::validate_fresh(&edit(number, field, change)?, at, false).is_err(),
+            "{number} {field}"
+        );
+    }
+    let mut without_gps = Vec::new();
+    for payload in rtcm::payloads(&bytes)? {
+        if rtcm::Message::decode(payload)?.number != 1019 {
+            without_gps.extend(rtcm::frame(payload)?);
+        }
+    }
+    assert!(agnss::validate_fresh(&without_gps, at, false).is_err());
     Ok(())
 }
 
