@@ -40,11 +40,15 @@ jobs:
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
       - name: Use the Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7
         with:
           use-flakehub: disabled
           use-gha-cache: enabled
+          diagnostic-endpoint: ""
       - name: Check the flake
         run: nix flake check --no-update-lock-file --print-build-logs
       - name: Build the tool
@@ -81,6 +85,9 @@ jobs:
         run: sha256sum Cargo.lock flake.lock > "$RUNNER_TEMP/lock-files.sha256"
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
       - name: Check the format
         run: |
           nix shell --inputs-from . nixpkgs#nixfmt -c nixfmt --check flake.nix nix/module.nix nix/tests/*.nix
