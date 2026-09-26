@@ -190,6 +190,28 @@ fn reviewed_kepler_records_match_huawei() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires the author's reviewed broadcast snapshot"]
+fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
+    use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let mut broadcast = Broadcast::default();
+    broadcast.add(&fs::read(
+        root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz"),
+    )?)?;
+    let at = Instant::parse("2026-09-26T05:43:07Z")?;
+    let (bytes, _) = agnss::build(&broadcast, &System::ALL, at)?;
+    agnss::validate_fresh(&bytes, at)?;
+    agnss::validate_fresh(&bytes, Instant::parse("2026-09-26T06:14:00Z")?)?;
+    let late = Instant::parse("2026-09-26T06:16:00Z")?;
+    let error = agnss::validate_fresh(&bytes, late).unwrap_err();
+    assert!(error.to_string().contains("1020"), "{error:#}");
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires local Huawei fixtures"]
 fn seed_and_extra_match_captured_bytes() -> Result<()> {
     let seed = Seed::parse(&fixture("HiEE_V2.expired-20260909.dat.gz")?)?;

@@ -239,6 +239,11 @@ gate can repeat each decision from the published file. The processor writes
 a copy of this file next to the report only when the checks pass. Orbit
 screening, AGNSS and Klobuchar data use all broadcast files. The newest
 Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
+The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
+time, a BeiDou ``toe`` more than 90 minutes away, and a GPS or Galileo ``toe``
+more than 2 hours away, as the external gate does. Each build fetches the
+broadcast files again. The fetcher reuses a cached URL for at most 2 minutes,
+so a snapshot never carries over to the next regeneration.
 
 The report uses the ``gb-gnss-zipbuilder/report/1`` format. The gate reads
 the ``format``, ``flavor``, ``built_at_unix``, ``seed``, ``health``,

@@ -220,7 +220,12 @@ pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {
             }
             _ => continue,
         };
-        ensure!(dt.abs() <= 7200.0, "stale AGNSS message {}", m.number);
+        let limit = match m.number {
+            1020 => 1800.0,
+            1042 => 5400.0,
+            _ => 7200.0,
+        };
+        ensure!(dt.abs() <= limit, "stale AGNSS message {}", m.number);
         if m.number == 1019 || m.number == 1046 || m.number == 1042 {
             let (offset, modulus) = match m.number {
                 1019 => (0.0, 1024.0),
@@ -235,7 +240,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {
             let system_now = now - if m.number == 1042 { 14.0 } else { 0.0 };
             ensure!(
                 (difference * 604800.0 + m.values["toe"] - system_now.rem_euclid(604800.0)).abs()
-                    <= 7200.0,
+                    <= limit,
                 "stale AGNSS week or epoch"
             );
         } else if m.number == 1020 {
@@ -249,7 +254,7 @@ pub fn validate_fresh(bytes: &[u8], at: Instant) -> Result<()> {
                 + chrono::Duration::seconds(m.values["tb"] as i64)
                 - chrono::Duration::hours(3);
             ensure!(
-                (epoch - at.0).num_seconds().abs() <= 7200,
+                (epoch - at.0).num_seconds().abs() as f64 <= limit,
                 "stale GLONASS RTCM day"
             );
         }
