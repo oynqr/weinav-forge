@@ -208,7 +208,7 @@ pub fn broadcast_position(
 fn evaluate(orbit: &Orbit, dt: f64, toe: f64, geo: bool) -> Result<[f64; 3]> {
     let [x, y, z] = orbit.geometry(dt, toe, geo, None).position;
     if geo {
-        let (s, c) = (-5_f64.to_radians()).sin_cos();
+        let (s, c) = (-GEO_FRAME_TILT_DEG.to_radians()).sin_cos();
         let y1 = y * c + z * s;
         let z1 = -y * s + z * c;
         let (s, c) = (orbit.earth_rate * dt).sin_cos();
@@ -218,17 +218,20 @@ fn evaluate(orbit: &Orbit, dt: f64, toe: f64, geo: bool) -> Result<[f64; 3]> {
     }
 }
 
+const GEO_FRAME_TILT_DEG: f64 = 5.0;
+const GEO_INCLINATION_LIMIT_DEG: f64 = 10.0;
+
 pub fn is_geo(system: System, p: &Parameters) -> bool {
     system == System::Bds
         && (40.0e6..44.5e6).contains(&(p[0] * p[0]))
-        && p[2].abs() < 10_f64.to_radians()
+        && p[2].abs() < (GEO_INCLINATION_LIMIT_DEG + GEO_FRAME_TILT_DEG).to_radians()
 }
 
 fn geo_frame([x, y, z]: [f64; 3], dt: f64) -> [f64; 3] {
     let (s, c) = (earth_rate(System::Bds) * dt).sin_cos();
     let x1 = x * c - y * s;
     let y1 = x * s + y * c;
-    let (s, c) = (-5_f64.to_radians()).sin_cos();
+    let (s, c) = (-GEO_FRAME_TILT_DEG.to_radians()).sin_cos();
     [x1, y1 * c - z * s, y1 * s + z * c]
 }
 
@@ -685,6 +688,7 @@ mod tests {
         for (system, sqrt_a, inclination, geo) in [
             (System::Bds, 6493.0, 0.03, true),
             (System::Bds, 6493.0, 0.16, true),
+            (System::Bds, 6493.0, 0.24, true),
             (System::Bds, 6493.0, 0.96, false),
             (System::Bds, 5282.6, 0.03, false),
             (System::Qzs, 6493.0, 0.03, false),
