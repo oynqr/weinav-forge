@@ -68,7 +68,10 @@ let
         fi
         printf '%s' "$stamp" > "$output/time"
         cat ${cache}/source > "$output/payload"
-        jq -n --argjson stamp "$stamp" '{status:"passed",timestamp_ms:$stamp}' > "$report"
+        printf 'broadcast %s\n' "$stamp" > "$output/brdc_last.rnx.Z"
+        broadcast=$(sha256sum "$output/brdc_last.rnx.Z")
+        jq -n --argjson stamp "$stamp" --arg sha256 "''${broadcast%% *}" \
+          '{status:"passed",timestamp_ms:$stamp,health:{source:"brdc_last.rnx.Z",sha256:$sha256}}' > "$report"
         (cd "$output"; zip -q -0 ephemeris.zip time payload)
       done < <(jq -r '.[] | [.name, .flavor] | @tsv' "$variants")
       exit "$failed"
@@ -260,6 +263,14 @@ pkgs.testers.runNixOSTest {
             assert int(machine.succeed("unzip -p /tmp/variant.zip time")) == variant["timestamp_ms"]
             assert variant["latest_url"] == f"/agnss/{variant['name']}/ephemeris.zip"
             assert variant["generation"] in variant["url"]
+            generation_url = f"/agnss/{variant['name']}/generations/{variant['generation']}"
+            assert variant["report_url"] == f"{generation_url}/report.json"
+            assert variant["broadcast_url"] == f"{generation_url}/broadcast/brdc_last.rnx.Z"
+            report = json.loads(machine.succeed(f"curl -fsS http://localhost{variant['report_url']}"))
+            assert report["status"] == "passed" and report["timestamp_ms"] == variant["timestamp_ms"]
+            machine.succeed(f"curl -fsS -D /tmp/headers http://localhost{variant['broadcast_url']} -o /tmp/broadcast")
+            assert "content-type: application/octet-stream" in machine.succeed("cat /tmp/headers").lower()
+            assert machine.succeed("sha256sum /tmp/broadcast").split()[0] == report["health"]["sha256"]
             if variant["name"] == "watch":
                 assert variant["flavor"] == "huawei" and variant["systems"] == ["gps"] and variant["agnss"]
             else:

@@ -160,6 +160,15 @@ let
         publication=$candidate
         cat "$stage/ephemeris.zip" > "$publication/ephemeris.zip"
         ${compressFile "$publication/ephemeris.zip"}
+        report=${quote "${cfg.stateDirectory}/reports/${name}.json"}
+        cat "$report" > "$publication/report.json"
+        ${compressFile "$publication/report.json"}
+        broadcast=$(jq -r '.health.source // empty' "$report")
+        if [ -n "$broadcast" ]; then
+          [[ "$broadcast" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]
+          digest=$(sha256sum "$stage/$broadcast")
+          [ "''${digest%% *}" = "$(jq -r '.health.sha256' "$report")" ]
+        fi
         printf '%s\n' ${
           quote (builtins.toJSON { inherit (instance) flavor systems agnss; })
         } > "$publication/variant.json"
@@ -172,6 +181,12 @@ let
         fi
         chmod 00770 "$publication"
         chmod 0640 "$publication"/*
+        if [ -n "$broadcast" ]; then
+          mkdir -m 0770 "$publication/broadcast"
+          chmod 00770 "$publication/broadcast"
+          cat "$stage/$broadcast" > "$publication/broadcast/$broadcast"
+          chmod 0640 "$publication/broadcast/$broadcast"
+        fi
         generation="generation-$(date +%s)-''${publication##*.}"
         sync -f "$publication"
         mv -T "$publication" "$destination/.generations/$generation"
@@ -212,12 +227,22 @@ let
           digest=$(sha256sum "$archive_root/ephemeris.zip")
           digest=''${digest%% *}
           stamp=$(unzip -p "$archive_root/ephemeris.zip" time)
+          generation_url=${quote "${cfg.nginx.location}${name}/generations/"}"$generation"
+          links='{}'
+          if [ -f "$archive_root/report.json" ]; then
+            links=$(jq -cn --arg url "$generation_url/report.json" '{report_url:$url}')
+            broadcast=$(jq -r '.health.source // empty' "$archive_root/report.json")
+            if [ -n "$broadcast" ] && [ -f "$archive_root/broadcast/$broadcast" ]; then
+              links=$(jq -cn --argjson links "$links" --arg url "$generation_url/broadcast/$broadcast" \
+                '$links + {broadcast_url:$url}')
+            fi
+          fi
           jq -cn --arg name ${quote name} --arg generation "$generation" \
-            --arg url "${cfg.nginx.location}${name}/generations/$generation/ephemeris.zip" \
+            --arg url "$generation_url/ephemeris.zip" \
             --arg latest_url ${quote "${cfg.nginx.location}${name}/ephemeris.zip"} \
             --arg sha256 "$digest" --argjson size "$(stat -c %s "$archive_root/ephemeris.zip")" \
-            --argjson timestamp_ms "$stamp" --argjson profile "$profile" \
-            '$profile + {name:$name,generation:$generation,url:$url,latest_url:$latest_url,sha256:$sha256,size:$size,timestamp_ms:$timestamp_ms}' \
+            --argjson timestamp_ms "$stamp" --argjson profile "$profile" --argjson links "$links" \
+            '$profile + {name:$name,generation:$generation,url:$url,latest_url:$latest_url,sha256:$sha256,size:$size,timestamp_ms:$timestamp_ms} + $links' \
             >> "$stage/variants.jsonl"
         fi
       '') names}
@@ -428,15 +453,33 @@ let
     ++ lib.concatMap (
       name:
       let
-        capture = "weinav_generation_${builtins.substring 0 12 (builtins.hashString "sha256" name)}";
+        suffix = builtins.substring 0 12 (builtins.hashString "sha256" name);
+        capture = "weinav_generation_${suffix}";
+        file = "weinav_file_${suffix}";
+        generations = "${cfg.nginx.location}${name}/generations/(?<${capture}>generation-[0-9]+-[A-Za-z0-9]+)";
+        root = "${cfg.outputDirectory}/${name}/.generations/${"$"}${capture}";
       in
       currentLocations "variant:${name}" "${name}/ephemeris.zip" name "ephemeris.zip" "application/zip"
       ++ [
         {
-          name = "~ ^${cfg.nginx.location}${name}/generations/(?<${capture}>generation-[0-9]+-[A-Za-z0-9]+)/ephemeris[.]zip$";
+          name = "~ ^${generations}/ephemeris[.]zip$";
           value.extraConfig = ''
-            alias ${cfg.outputDirectory}/${name}/.generations/${"$"}${capture}/ephemeris.zip;
+            alias ${root}/ephemeris.zip;
             ${serveConfig "application/zip" true}
+          '';
+        }
+        {
+          name = "~ ^${generations}/report[.]json$";
+          value.extraConfig = ''
+            alias ${root}/report.json;
+            ${serveConfig "application/json" true}
+          '';
+        }
+        {
+          name = "~ ^${generations}/broadcast/(?<${file}>[A-Za-z0-9_][A-Za-z0-9._-]*)$";
+          value.extraConfig = ''
+            alias ${root}/broadcast/${"$"}${file};
+            ${serveConfig "application/octet-stream" true}
           '';
         }
       ]

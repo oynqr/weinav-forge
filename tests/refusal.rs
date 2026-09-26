@@ -79,6 +79,7 @@ fn empty_inputs() -> Inputs {
         acceleration: None,
         broadcast: Broadcast::default(),
         health: Broadcast::default(),
+        health_snapshot: vec![],
         predictions: BTreeMap::new(),
         antex: None,
         raw: BTreeMap::new(),

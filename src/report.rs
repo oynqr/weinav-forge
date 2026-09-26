@@ -18,7 +18,11 @@ pub fn published_name(source: &Source) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         .collect();
-    if name.trim_matches('.').is_empty() || matches!(name.as_str(), "report.json" | "ephemeris.zip")
+    if name.trim_matches('.').is_empty()
+        || matches!(
+            name.as_str(),
+            "report.json" | "ephemeris.zip" | "ephemeris.UNSAFE.zip"
+        )
     {
         "broadcast.rnx".into()
     } else {

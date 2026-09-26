@@ -371,6 +371,12 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
         ));
     cache::atomic_write(&report_path, &serde_json::to_vec_pretty(&report)?)?;
     if accepted {
+        if let Some(source) = inputs.health_source() {
+            cache::atomic_write(
+                &options.output.join(report::published_name(source)),
+                &inputs.health_snapshot,
+            )?;
+        }
         cache::atomic_write(&zip_path, &packed.unwrap())?;
         println!("Wrote {} and {}", zip_path.display(), report_path.display());
         Ok(0)

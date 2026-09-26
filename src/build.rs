@@ -24,6 +24,7 @@ pub struct Inputs {
     pub acceleration: Option<Acceleration>,
     pub broadcast: Broadcast,
     pub health: Broadcast,
+    pub health_snapshot: Vec<u8>,
     pub predictions: BTreeMap<Role, Sp3>,
     pub antex: Option<Antex>,
     pub raw: BTreeMap<Role, Vec<Vec<u8>>>,
@@ -129,6 +130,7 @@ impl Inputs {
                 let mut health = Broadcast::default();
                 health.add(&bytes)?;
                 self.health = health;
+                self.health_snapshot = bytes;
             }
             Role::Prediction | Role::BdsPrediction | Role::QzsPrediction => {
                 self.predictions.entry(role).or_default().add(&bytes)?;
