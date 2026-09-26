@@ -223,6 +223,9 @@ An instance appears only after it has a published ZIP. A failed update keeps
 the previous entry, including an expired file and its original timestamp.
 If the manifest update fails, the previous manifest stays available.
 
+Clients can cache each file for five minutes. The latest URLs support ETags
+to check for changes. URLs with generation identifiers are marked immutable.
+
 Common options under ``services.weinav-forge`` are:
 
 * ``package``: executable package override.

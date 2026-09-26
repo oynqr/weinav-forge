@@ -380,7 +380,7 @@ let
       ])
     ) (lib.tail (lib.splitString "/" path));
 
-  serveConfig = mime: ''
+  serveConfig = mime: immutable: ''
     default_type ${mime};
     types { }
     gzip off;
@@ -389,7 +389,9 @@ let
     brotli_static ${if cfg.compression.brotli.enable then "on" else "off"};
     gzip_vary on;
     add_header Vary Accept-Encoding always;
-    add_header Cache-Control "no-store" always;
+    etag on;
+    expires off;
+    add_header Cache-Control "public, max-age=300${lib.optionalString immutable ", immutable"}";
     open_file_cache off;
     autoindex off;
     limit_except GET { deny all; }
@@ -416,7 +418,7 @@ let
         value.extraConfig = ''
           internal;
           alias ${"$"}${variable}/${file};
-          ${serveConfig mime}
+          ${serveConfig mime false}
         '';
       }
     ];
@@ -434,7 +436,7 @@ let
           name = "~ ^${cfg.nginx.location}${name}/generations/(?<${capture}>generation-[0-9]+-[A-Za-z0-9]+)/ephemeris[.]zip$";
           value.extraConfig = ''
             alias ${cfg.outputDirectory}/${name}/.generations/${"$"}${capture}/ephemeris.zip;
-            ${serveConfig "application/zip"}
+            ${serveConfig "application/zip" true}
           '';
         }
       ]

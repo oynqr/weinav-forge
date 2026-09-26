@@ -265,17 +265,26 @@ pkgs.testers.runNixOSTest {
         return manifest
 
     def check_encodings():
-        for url, path, mime in [
-            ("/agnss/watch/ephemeris.zip", "${public}/watch/current/ephemeris.zip", "application/zip"),
-            ("/agnss/manifest.json", "${public}/manifest.json", "application/json"),
-        ]:
+        manifest = check_manifest()
+        files = [
+            ("/agnss/manifest.json", "${public}/manifest.json", "application/json", False),
+        ]
+        for variant in manifest["variants"]:
+            path = "${public}/" + variant["name"] + "/current/ephemeris.zip"
+            files.append((variant["latest_url"], path, "application/zip", False))
+            files.append((variant["url"], path, "application/zip", True))
+        for url, path, mime, immutable in files:
             for encoding, suffix, command in [("identity", "", "cat"), ("gzip", ".gz", "pigz -dc"), ("br", ".br", "brotli -dc")]:
                 exists = encoding != "identity" and machine.execute(f"test -f {path}{suffix}")[0] == 0
                 machine.succeed(f"curl -fsS -D /tmp/headers -H 'Accept-Encoding: {encoding}' http://localhost{url} -o /tmp/encoded")
                 headers = machine.succeed("cat /tmp/headers").lower()
                 assert f"content-type: {mime}" in headers
-                assert "cache-control: no-store" in headers
+                cache_control = "public, max-age=300" + (", immutable" if immutable else "")
+                assert f"cache-control: {cache_control}" in headers.splitlines()
+                assert "no-store" not in headers
+                assert ("immutable" in headers) == immutable
                 assert "vary: accept-encoding" in headers
+                etag = next(line.split(": ", 1)[1] for line in headers.splitlines() if line.startswith("etag: "))
                 if exists:
                     assert f"content-encoding: {encoding}" in headers
                     assert int(machine.succeed(f"stat -Lc %s {path}{suffix}")) < int(machine.succeed(f"stat -Lc %s {path}"))
@@ -283,7 +292,17 @@ pkgs.testers.runNixOSTest {
                     assert "content-encoding:" not in headers
                     command = "cat"
                 machine.succeed(f"{command} /tmp/encoded > /tmp/decoded; cmp /tmp/decoded {path}")
-        check_manifest()
+                machine.succeed(f"curl -fsS -D /tmp/headers -H 'Accept-Encoding: {encoding}' -H 'If-None-Match: {etag}' http://localhost{url} -o /dev/null")
+                unchanged = machine.succeed("cat /tmp/headers").lower()
+                assert "304 not modified" in unchanged
+                assert f"cache-control: {cache_control}" in unchanged.splitlines()
+                assert "vary: accept-encoding" in unchanged
+
+    def current_etags():
+        return {
+            url: next(line.split(": ", 1)[1] for line in machine.succeed(f"curl -fsSI http://localhost{url}").splitlines() if line.lower().startswith("etag: "))
+            for url in ["/agnss/manifest.json", "/agnss/watch/ephemeris.zip"]
+        }
 
     check_encodings()
     first_manifest = check_manifest()
@@ -293,6 +312,10 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost{path}").strip() == "404"
     first = current()
     first_digest = digest()
+    first_etags = current_etags()
+    missing = machine.succeed("curl -sSI http://localhost/agnss/watch/generations/generation-0-missing/ephemeris.zip").lower()
+    assert "404 not found" in missing
+    assert "max-age=300" not in missing and "immutable" not in missing
     machine.fail("runuser -u nginx -- cat ${cache}/source")
     machine.fail("runuser -u nginx -- cat ${state}/reports/watch.json")
     machine.fail("runuser -u nginx -- touch ${public}/nginx-must-not-write")
@@ -346,6 +369,11 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(f"test $(readlink ${public}/watch/current) != {first}")
     machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value weinav-forge-build) = inactive")
     assert digest() != first_digest
+    updated_etags = current_etags()
+    assert all(updated_etags[url] != etag for url, etag in first_etags.items())
+    for url, etag in first_etags.items():
+        headers = machine.succeed(f"curl -fsSI -H 'If-None-Match: {etag}' http://localhost{url}").lower()
+        assert "200 ok" in headers
     machine.succeed("test ! -e ${public}/watch/.generations/.stage.interrupted")
     check_encodings()
 
