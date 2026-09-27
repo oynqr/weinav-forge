@@ -763,13 +763,14 @@ fn reviewed_open_agnss_omits_only_stale_glonass() -> Result<()> {
     let fresh = Instant::parse("2026-09-26T06:14:00Z")?;
     let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, fresh, None)?;
     assert!(count(&bytes, 1020)? > 0);
-    assert_eq!(omitted, 0);
+    assert_eq!(omitted[&System::Glonass], 0);
+    assert_eq!(omitted[&System::Bds], 0);
     assert!(!notes.iter().any(|n| n.contains("omitted")), "{notes:?}");
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
     let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, late, None)?;
     agnss::validate_fresh(&bytes, late, true)?;
     assert_eq!(count(&bytes, 1020)?, 0);
-    assert!(omitted > 0);
+    assert!(omitted[&System::Glonass] > 0);
     assert!(count(&bytes, 1019)? > 0 && count(&bytes, 1042)? > 0 && count(&bytes, 1046)? > 0);
     assert!(
         notes
@@ -884,6 +885,43 @@ fn reviewed_open_galileo_records_are_selected_by_toe() -> Result<()> {
         }
     }
     assert!(galileo > 20);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the author's reviewed broadcast snapshot"]
+fn reviewed_open_agnss_omits_stale_bds_until_none_is_within_two_hours() -> Result<()> {
+    use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let mut broadcast = Broadcast::default();
+    broadcast.add(&fs::read(
+        root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz"),
+    )?)?;
+    let newest_bds_105_min_old = Instant::parse("2026-09-26T06:45:00Z")?;
+    let (bytes, notes, omitted) =
+        agnss::build(&broadcast, &System::ALL, newest_bds_105_min_old, None)?;
+    agnss::validate_fresh(&bytes, newest_bds_105_min_old, true)?;
+    assert!(omitted[&System::Bds] > 0);
+    for payload in rtcm::payloads(&bytes)? {
+        assert_ne!(rtcm::Message::decode(payload)?.number, 1042);
+    }
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("BDS") && n.contains("toe more than 90 min")),
+        "{notes:?}"
+    );
+    let newest_bds_130_min_old = Instant::parse("2026-09-26T07:10:00Z")?;
+    let error = agnss::build(&broadcast, &System::ALL, newest_bds_130_min_old, None)
+        .err()
+        .context("BDS more than 2 hours old was accepted")?;
+    assert!(
+        error.to_string().contains("no fresh healthy BDS"),
+        "{error:#}"
+    );
     Ok(())
 }
 

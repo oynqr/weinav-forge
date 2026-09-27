@@ -318,15 +318,21 @@ week, as the external gate does, when both of these conditions are true:
 The report notes the number of such messages. The builder writes the week of
 the ``toe``, and the check of the builder's own stream accepts only that week.
 
-When the builder makes AGNSS
-from broadcast, it omits each GLONASS
-ephemeris whose ``t_b`` is more than 30 minutes from the build time, because
-BKG publishes each new ``t_b`` a few minutes late. The report counts them in
-``agnss_glonass_omitted``, which is null when the AGNSS does not come from
-broadcast. When every GLONASS ephemeris is 30 minutes to 2 hours old, the
-stream carries no GLONASS. When no healthy GLONASS ephemeris is within 2 hours,
-the build is refused, because the broadcast source is then broken rather than
-late. Each
+When the builder makes AGNSS from broadcast, it omits each GLONASS ephemeris
+whose ``t_b`` is more than 30 minutes from the build time, and each BeiDou
+ephemeris whose ``toe`` is more than 90 minutes from the build time. These are
+the limits of the AGNSS check. BKG publishes each new GLONASS ``t_b`` a few
+minutes late, and each hourly BeiDou data set 10 to 25 minutes after its
+``toe``. In the open builds of 26 and 27 September 2026, the GLONASS ``t_b``
+was 8 to 29 minutes old and the BeiDou ``toe`` 55 to 74 minutes old. Thus a
+late publication can make a whole constellation stale, and the omission then
+keeps the other constellations instead of refusing the build. The report
+counts the omitted ephemerides in ``agnss_glonass_omitted`` and
+``agnss_bds_omitted``, which are null when the AGNSS does not come from
+broadcast. When every ephemeris of one of these constellations is between its
+limit and 2 hours old, the stream carries none of that constellation. When no
+healthy ephemeris of the constellation is within 2 hours, the build is
+refused, because the broadcast source is then broken rather than late. Each
 build fetches the broadcast files again. The fetcher reuses a cached URL for at
 most 2 minutes, so a snapshot never carries over to the next regeneration.
 

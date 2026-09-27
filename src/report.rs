@@ -180,6 +180,7 @@ mod tests {
             notes: vec![],
             screened: 0,
             agnss_glonass_omitted: None,
+            agnss_bds_omitted: None,
             klobuchar: None,
         };
         let inputs = Inputs {

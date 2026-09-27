@@ -201,15 +201,25 @@ fn age_limit(number: u16) -> f64 {
     }
 }
 
+pub type OmittedEphemerides = BTreeMap<System, usize>;
+
+fn omission(system: System) -> Option<(f64, &'static str)> {
+    match system {
+        System::Glonass => Some((age_limit(1020), "t_b more than 30 min")),
+        System::Bds => Some((age_limit(1042), "toe more than 90 min")),
+        _ => None,
+    }
+}
+
 pub fn build(
     broadcast: &Broadcast,
     systems: &[System],
     at: Instant,
     ionosphere: Option<&Message>,
-) -> Result<(Vec<u8>, Vec<String>, usize)> {
+) -> Result<(Vec<u8>, Vec<String>, OmittedEphemerides)> {
     let mut out = Vec::new();
     let mut notes = Vec::new();
-    let mut omitted = 0;
+    let mut omitted = BTreeMap::new();
     let now = at.gps() as f64;
     for system in [System::Gps, System::Glonass, System::Bds, System::Galileo] {
         if !systems.contains(&system) {
@@ -222,8 +232,8 @@ pub fn build(
                 .nearest_toe(system, id, now)
                 .filter(|n| n.healthy())
             {
-                let age = now - nav.epoch;
-                if system == System::Glonass && age.abs() > age_limit(1020) {
+                let age = now - nav.toe()?;
+                if omission(system).is_some_and(|(limit, _)| age.abs() > limit) {
                     stale += 1;
                     continue;
                 }
@@ -231,13 +241,16 @@ pub fn build(
                 ages.push(age);
             }
         }
-        omitted += stale;
-        if stale > 0 {
-            notes.push(format!(
-                "AGNSS: {stale} GLONASS ephemerides with t_b more than 30 min from the build are omitted"
-            ));
-            if ages.is_empty() {
-                continue;
+        if let Some((_, rule)) = omission(system) {
+            omitted.insert(system, stale);
+            if stale > 0 {
+                notes.push(format!(
+                    "AGNSS: {stale} {} ephemerides with {rule} from the build are omitted",
+                    system.name()
+                ));
+                if ages.is_empty() {
+                    continue;
+                }
             }
         }
         ensure!(

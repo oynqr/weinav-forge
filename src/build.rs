@@ -381,6 +381,7 @@ pub struct Products {
     pub notes: Vec<String>,
     pub screened: usize,
     pub agnss_glonass_omitted: Option<usize>,
+    pub agnss_bds_omitted: Option<usize>,
     pub klobuchar: Option<crate::agnss::KlobucharSource>,
 }
 
@@ -552,6 +553,7 @@ pub fn assemble(
         notes: Vec::new(),
         screened: 0,
         agnss_glonass_omitted: None,
+        agnss_bds_omitted: None,
         klobuchar: None,
     };
     if let Some(seed) = &inputs.seed {
@@ -609,7 +611,8 @@ pub fn assemble(
                 klobuchar.as_ref().map(|(message, _)| message),
             )?;
             product.notes.extend(notes);
-            product.agnss_glonass_omitted = Some(omitted);
+            product.agnss_glonass_omitted = omitted.get(&System::Glonass).copied();
+            product.agnss_bds_omitted = omitted.get(&System::Bds).copied();
             product.klobuchar = klobuchar.map(|(_, source)| source);
             bytes
         };
