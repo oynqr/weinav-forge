@@ -720,6 +720,55 @@ fn reviewed_flagged_arc_far_from_broadcast_removes_the_satellite() -> Result<()>
 }
 
 #[test]
+#[ignore = "requires the author's reviewed seed and broadcast snapshot"]
+fn reviewed_galileo_listed_only_by_inav_is_screened_not_dropped() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    const E25_SV_INDEX: f64 = 24.0;
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    )
+    .join("galileo_inav");
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2_534efb0e.dat")]),
+        (
+            Role::Broadcast,
+            vec![root.join("BRDC00WRD_S_20262450000_01D_MN.rnx.gz")],
+        ),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &[System::Galileo],
+        false,
+        &local,
+    )?;
+    let at = Instant::parse("2026-09-03T00:24:42Z")?;
+    let now = at.gps() as f64;
+    assert!(inputs.broadcast.nearest(System::Galileo, 25, now).is_none());
+    let products = build::assemble(&inputs, Flavor::Huawei, &[System::Galileo], false, at, 1.0)?;
+    for report in &products.epochs {
+        assert!(
+            !report.removals.iter().any(|r| r.starts_with("25:")),
+            "{:?}",
+            report.removals
+        );
+    }
+    let epochs = record::parse_container(System::Galileo, &products.files["HW_PGNSS_GALILEO"])?;
+    let shipped = epochs[0].blocks[0]
+        .iter()
+        .any(|bytes| record::decode(System::Galileo, bytes).is_ok_and(|v| v["sv"] == E25_SV_INDEX));
+    assert!(shipped, "E25 missing from the first epoch");
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires the author's reviewed broadcast snapshot"]
 fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
     use weinav_forge::{agnss, rinex::Broadcast, time::Instant};

@@ -699,7 +699,7 @@ pub fn assemble(
                         let now = at.gps() as f64;
                         let reference = inputs
                             .broadcast
-                            .nearest(system, id, now)
+                            .nearest_any_message(system, id, now)
                             .context("absent from fresh broadcast")?
                             .state(now)?;
                         let flagged = (orbit == "hiee")

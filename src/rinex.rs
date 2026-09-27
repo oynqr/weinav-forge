@@ -310,12 +310,32 @@ impl Broadcast {
         }
     }
 
-    fn fresh(&self, system: System, svid: u8, time: f64) -> impl Iterator<Item = &Navigation> {
+    fn in_window(&self, system: System, svid: u8, time: f64) -> impl Iterator<Item = &Navigation> {
         self.records
             .get(&(system, svid))
             .into_iter()
             .flatten()
-            .filter(move |r| (r.epoch - time).abs() <= FRESH_WINDOW_S && carries_fnav(system, r))
+            .filter(move |r| (r.epoch - time).abs() <= FRESH_WINDOW_S)
+    }
+
+    fn fresh(&self, system: System, svid: u8, time: f64) -> impl Iterator<Item = &Navigation> {
+        self.in_window(system, svid, time)
+            .filter(move |r| carries_fnav(system, r))
+    }
+
+    pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.fresh(system, svid, time)
+            .min_by(|a, b| (a.epoch - time).abs().total_cmp(&(b.epoch - time).abs()))
+    }
+
+    pub fn nearest_any_message(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.in_window(system, svid, time)
+            .min_by(|a, b| (a.epoch - time).abs().total_cmp(&(b.epoch - time).abs()))
+    }
+
+    pub fn newest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.in_window(system, svid, time)
+            .max_by(|a, b| a.epoch.total_cmp(&b.epoch))
     }
 
     pub fn nearest_toe(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
@@ -328,16 +348,6 @@ impl Broadcast {
             .filter(|(_, distance)| *distance <= FRESH_WINDOW_S)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(r, _)| r)
-    }
-
-    pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
-        self.fresh(system, svid, time)
-            .min_by(|a, b| (a.epoch - time).abs().total_cmp(&(b.epoch - time).abs()))
-    }
-
-    pub fn newest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
-        self.fresh(system, svid, time)
-            .max_by(|a, b| a.epoch.total_cmp(&b.epoch))
     }
 }
 
@@ -558,11 +568,18 @@ mod tests {
         Ok(())
     }
 
+    const FNAV: f64 = 258.0;
+    const INAV: f64 = 517.0;
+
     fn galileo(hour: u32, minute: u32, toe: f64) -> Vec<u8> {
+        galileo_message(hour, minute, toe, FNAV)
+    }
+
+    fn galileo_message(hour: u32, minute: u32, toe: f64, data_sources: f64) -> Vec<u8> {
         let names = super::schema::names('E').unwrap();
         let value = |name: &str| match name {
             "toe" => toe,
-            "data_sources" => 258.0,
+            "data_sources" => data_sources,
             "sv_health" => 0.0,
             _ => 1.0,
         };
@@ -608,6 +625,32 @@ mod tests {
                 .nearest_toe(System::Galileo, 11, at)
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn any_galileo_message_lists_a_satellite_but_only_fnav_gives_values() -> Result<()> {
+        let at = (Utc
+            .with_ymd_and_hms(2026, 9, 26, 6, 0, 0)
+            .unwrap()
+            .timestamp()
+            - GPS_EPOCH_UNIX) as f64;
+        let saturday = 6.0 * 86400.0;
+        let mut inav_only = Broadcast::default();
+        inav_only.add(&galileo_message(
+            5,
+            50,
+            saturday + 5.0 * 3600.0 + 50.0 * 60.0,
+            INAV,
+        ))?;
+        assert!(inav_only.newest(System::Galileo, 11, at).is_some());
+        assert!(
+            inav_only
+                .nearest_any_message(System::Galileo, 11, at)
+                .is_some()
+        );
+        assert!(inav_only.nearest(System::Galileo, 11, at).is_none());
+        assert!(inav_only.nearest_toe(System::Galileo, 11, at).is_none());
         Ok(())
     }
 

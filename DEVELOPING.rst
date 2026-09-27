@@ -269,7 +269,11 @@ The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external
 gate can repeat each decision from the published file. The processor writes
 a copy of this file next to the report only when the checks pass. Orbit
-screening and AGNSS use all broadcast files. The daily file of the day before
+screening and AGNSS use all broadcast files. In the health screen and in the
+orbit comparison at the build time, each Galileo navigation message, I/NAV or
+F/NAV, gives a record, as in the external gate. The two messages of one data
+set give the same orbit. Values that differ between them, such as clock and
+group delay, come from F/NAV records only. The daily file of the day before
 is required. The daily file of the build day is used when BKG has published
 it: early in the UTC day it does not exist yet, and ``brdc_last.rnx.Z`` then
 gives the last 24 hours.
