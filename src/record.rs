@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub mod envelopes;
 #[path = "record_fields.rs"]
 mod schema;
+pub use schema::fields;
 
 pub struct Field {
     pub name: &'static str,

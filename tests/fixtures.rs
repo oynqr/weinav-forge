@@ -964,46 +964,77 @@ fn known_bad_qzss_is_rejected_without_losing_container_geometry() -> Result<()> 
     Ok(())
 }
 
+fn generated_envelopes(gate: &serde_json::Value, sha256: &str) -> Result<String> {
+    let mut text = format!(
+        "use crate::policy::System;\npub const GATE_SHA256: &str = \"{sha256}\";\npub fn bounds(system: System) -> &'static [(&'static str, f64, f64)] {{\n    match system {{\n"
+    );
+    for system in System::ALL {
+        text.push_str(&format!("        System::{system:?} => &[\n"));
+        let fields = gate["constellations"][system.name()]["fields"]
+            .as_object()
+            .context("gate constellation")?;
+        let mut by_offset: Vec<_> = fields.iter().collect();
+        by_offset.sort_by_key(|(_, field)| field["offset"].as_u64());
+        for (name, field) in by_offset {
+            if field["class"] == "exact" || field["unit"] == "tag" {
+                continue;
+            }
+            let scale = record::fields(system)
+                .iter()
+                .find(|f| f.name == name)
+                .with_context(|| format!("{system:?} {name} is not a record field"))?
+                .scale;
+            let (low, high) = if field["env_min"].is_null() {
+                ("store_min", "store_max")
+            } else {
+                ("env_min", "env_max")
+            };
+            let limit = |key: &str| -> Result<f64> {
+                let raw = field[key].as_i64().context("integer limit")?;
+                Ok(raw as f64 * scale)
+            };
+            text.push_str(&format!(
+                "            (\"{name}\", {:?}, {:?}),\n",
+                limit(low)?,
+                limit(high)?
+            ));
+        }
+        text.push_str("        ],\n");
+    }
+    text.push_str("    }\n}\n");
+    Ok(text)
+}
+
+fn table_text(sha256: &str) -> String {
+    let mut text = format!(
+        "use crate::policy::System;\npub const GATE_SHA256: &str = \"{sha256}\";\npub fn bounds(system: System) -> &'static [(&'static str, f64, f64)] {{\n    match system {{\n"
+    );
+    for system in System::ALL {
+        text.push_str(&format!("        System::{system:?} => &[\n"));
+        for (name, low, high) in record::envelopes::bounds(system) {
+            text.push_str(&format!("            (\"{name}\", {low:?}, {high:?}),\n"));
+        }
+        text.push_str("        ],\n");
+    }
+    text.push_str("    }\n}\n");
+    text
+}
+
 #[test]
 #[ignore = "requires the external gate's g2_envelopes.json"]
 fn envelopes_match_the_gate() -> Result<()> {
     let path = std::env::var_os("WEINAV_GATE_ENVELOPES")
         .context("set WEINAV_GATE_ENVELOPES to the external gate's g2_envelopes.json")?;
     let bytes = fs::read(path)?;
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        record::envelopes::GATE_SHA256
-    );
-    let gate: serde_json::Value = serde_json::from_slice(&bytes)?;
-    for system in System::ALL {
-        let fields = gate["constellations"][system.name()]["fields"]
-            .as_object()
-            .context("gate constellation")?;
-        let bounds = |name: &str| {
-            let field = &fields[name];
-            let scale = field["scale"].as_f64()?;
-            record::envelopes::bounds(system)
-                .iter()
-                .find(|&&(n, _, _)| n == name)
-                .map(|&(_, low, high)| ((low / scale).round(), (high / scale).round()))
-        };
-        let limits = |name: &str, low: &str, high: &str| {
-            Some((fields[name][low].as_f64()?, fields[name][high].as_f64()?))
-        };
-        for name in fields.keys() {
-            if let Some(envelope) = limits(name, "env_min", "env_max") {
-                assert_eq!(bounds(name), Some(envelope), "{system:?} {name}");
-            }
-        }
-        for &(name, _, _) in record::envelopes::bounds(system) {
-            if fields[name]["env_min"].is_null() {
-                assert_eq!(
-                    bounds(name),
-                    limits(name, "store_min", "store_max"),
-                    "{system:?} {name}"
-                );
-            }
-        }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let expected = generated_envelopes(&serde_json::from_slice(&bytes)?, &sha256)?;
+    if expected != table_text(record::envelopes::GATE_SHA256) {
+        let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("envelopes.rs");
+        fs::write(&generated, &expected)?;
+        anyhow::bail!(
+            "the envelope table differs from the gate file {sha256}: copy {} to src/envelopes.rs and run cargo fmt",
+            generated.display()
+        );
     }
     Ok(())
 }
