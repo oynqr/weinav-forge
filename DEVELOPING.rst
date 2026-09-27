@@ -263,7 +263,11 @@ Seed arcs with the flag set are not used. A Kepler record is removed when one
 of its fit samples falls in such an arc, and a GLONASS record when its time
 does. Each satellite's orbit is compared with broadcast at the build time.
 When the seed arc at that time has the flag set, that comparison uses the
-flagged arc, which no record uses.
+flagged arc, which no record uses. A satellite that the seed marks unhealthy
+is removed there, also when its arc has the flag set. Each epoch of the report
+gives the distance of each kept satellite in ``screen_distances_m``. The
+report notes a broadcast health snapshot whose newest GPS or GLONASS record is
+more than 45 minutes older than the build, because such a file can be stale.
 
 The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external

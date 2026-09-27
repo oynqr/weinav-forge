@@ -196,6 +196,7 @@ fn declared_whole_grid_gaps_require_open_permission() -> Result<()> {
                 quantized_sigma_max_m: 0.0,
                 clock_alignment_ns: None,
                 removals: vec![],
+                screen_distances_m: Default::default(),
                 envelope_removals: vec![],
             })
             .collect();

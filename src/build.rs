@@ -214,8 +214,12 @@ impl Inputs {
     }
 
     fn flagged_seed_state(&self, system: System, id: u8, time: f64) -> Option<Result<State>> {
-        let arc = self.satellites.get(&system)?.get(&id)?.arc_at(time)?;
-        (arc.flag != 0).then(|| arc.evaluate(time))
+        let satellite = self.satellites.get(&system)?.get(&id)?;
+        let arc = satellite.arc_at(time)?;
+        (arc.flag != 0).then(|| {
+            ensure!(satellite.health == 0, "seed satellite is unhealthy");
+            arc.evaluate(time)
+        })
     }
 
     fn state(&self, system: System, id: u8, time: f64, provider: &str) -> Result<State> {
@@ -372,7 +376,33 @@ pub struct EpochReport {
     pub quantized_sigma_max_m: f64,
     pub clock_alignment_ns: Option<f64>,
     pub removals: Vec<String>,
+    pub screen_distances_m: BTreeMap<u8, f64>,
     pub envelope_removals: Vec<String>,
+}
+
+const SNAPSHOT_LAG_NOTE_S: f64 = 2700.0;
+
+pub fn stale_snapshot_notes(snapshot: &Broadcast, at: Instant) -> Vec<String> {
+    let now = at.gps() as f64;
+    [System::Gps, System::Glonass]
+        .into_iter()
+        .filter_map(|system| {
+            let newest = snapshot
+                .records
+                .iter()
+                .filter(|((s, _), _)| *s == system)
+                .flat_map(|(_, records)| records)
+                .map(|record| record.epoch)
+                .max_by(f64::total_cmp)?;
+            (now - newest > SNAPSHOT_LAG_NOTE_S).then(|| {
+                format!(
+                    "broadcast snapshot: the newest {} record is {:.0} min older than the build",
+                    system.name(),
+                    (now - newest) / 60.0
+                )
+            })
+        })
+        .collect()
 }
 
 pub struct Products {
@@ -556,6 +586,9 @@ pub fn assemble(
         agnss_bds_omitted: None,
         klobuchar: None,
     };
+    product
+        .notes
+        .extend(stale_snapshot_notes(&inputs.health, at));
     if let Some(seed) = &inputs.seed {
         ensure!(
             seed.brackets(at.gps() as f64, (at.gps() + 43200) as f64),
@@ -685,6 +718,7 @@ pub fn assemble(
                     quantized_sigma_max_m: 0.0,
                     clock_alignment_ns: None,
                     removals: Vec::new(),
+                    screen_distances_m: BTreeMap::new(),
                     envelope_removals: Vec::new(),
                 };
                 let alignment = inputs.clock_alignment(system, clock, time as f64, at);
@@ -694,7 +728,7 @@ pub fn assemble(
                 let mut blocks = Vec::new();
                 let mut screened_ids = BTreeSet::new();
                 for id in inputs.ids(system, orbit) {
-                    let screen = (|| -> Result<()> {
+                    let screen = (|| -> Result<f64> {
                         inputs.screen_health(system, id, at)?;
                         let now = at.gps() as f64;
                         let reference = inputs
@@ -717,11 +751,14 @@ pub fn assemble(
                             distance <= 200.0,
                             "independent broadcast position differs by {distance:.1} m"
                         );
-                        Ok(())
+                        Ok(distance)
                     })();
                     match screen {
-                        Ok(()) => {
+                        Ok(distance) => {
                             screened_ids.insert(id);
+                            report
+                                .screen_distances_m
+                                .insert(id, (distance * 1000.0).round() / 1000.0);
                         }
                         Err(e) => report.removals.push(format!("{id}: {e:#}")),
                     }

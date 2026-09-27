@@ -139,6 +139,7 @@ mod tests {
             quantized_sigma_max_m: 0.0,
             clock_alignment_ns: None,
             removals: vec![],
+            screen_distances_m: Default::default(),
             envelope_removals: vec![],
         }
     }

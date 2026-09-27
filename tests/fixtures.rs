@@ -769,6 +769,72 @@ fn reviewed_galileo_listed_only_by_inav_is_screened_not_dropped() -> Result<()> 
 }
 
 #[test]
+#[ignore = "requires the author's reviewed seed and broadcast snapshot"]
+fn reviewed_screen_reports_distances_and_the_seed_health_of_flagged_arcs() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        rinex::Broadcast,
+        time::Instant,
+    };
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let snapshot = root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz");
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2.dat")]),
+        (Role::Broadcast, vec![snapshot.clone()]),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let mut inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &[System::Bds],
+        false,
+        &local,
+    )?;
+    let at = Instant::parse("2026-09-26T05:43:07Z")?;
+    let now = at.gps() as f64;
+    let products = build::assemble(&inputs, Flavor::Huawei, &[System::Bds], false, at, 1.0)?;
+    let first = &products.epochs[0];
+    assert!(first.screen_distances_m.len() > 20);
+    assert!(first.screen_distances_m.values().all(|d| *d <= 200.0));
+    let c07 = inputs
+        .satellites
+        .get_mut(&System::Bds)
+        .and_then(|s| s.get_mut(&7))
+        .context("C07 in the seed")?;
+    c07.health = 1;
+    c07.arcs
+        .iter_mut()
+        .find(|a| a.start <= now && now < a.end)
+        .context("C07 arc at the build time")?
+        .flag = 1;
+    let products = build::assemble(&inputs, Flavor::Huawei, &[System::Bds], false, at, 1.0)?;
+    let first = &products.epochs[0];
+    assert!(!first.screen_distances_m.contains_key(&7));
+    assert!(
+        first
+            .removals
+            .contains(&"7: seed satellite is unhealthy".to_string()),
+        "{:?}",
+        first.removals
+    );
+
+    let mut broadcast = Broadcast::default();
+    broadcast.add(&fs::read(&snapshot)?)?;
+    let glonass_an_hour_old = Instant::parse("2026-09-26T06:45:00Z")?;
+    assert_eq!(
+        build::stale_snapshot_notes(&broadcast, glonass_an_hour_old),
+        ["broadcast snapshot: the newest GLONASS record is 60 min older than the build"]
+    );
+    assert!(build::stale_snapshot_notes(&broadcast, at).is_empty());
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires the author's reviewed broadcast snapshot"]
 fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
     use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
