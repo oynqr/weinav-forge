@@ -381,14 +381,12 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                     );
                 }
                 Role::Broadcast => {
-                    for day in [options.at.0 - chrono::Duration::days(1), options.at.0] {
-                        let stamp = day.format("%Y%j");
-                        let candidates=[("IGS","S"),("MGEX","S"),("IGS","R"),("EUREF","R")].map(|(pool,kind)|("brdc".into(),format!("https://igs.bkg.bund.de/root_ftp/{pool}/BRDC/{}/{:03}/BRDC00WRD_{kind}_{stamp}0000_01D_MN.rnx.gz",day.year(),day.ordinal())));
-                        sources.push(fetcher.chain(role, &candidates)?);
-                    }
-                    let klobuchar = [options.at.0, options.at.0 - chrono::Duration::days(1)].map(|day| ("brdc".into(), format!("https://igs.bkg.bund.de/root_ftp/EUREF/BRDC/{}/{:03}/BRDC00WRD_R_{}0000_01D_MN.rnx.gz", day.year(), day.ordinal(), day.format("%Y%j"))));
-                    if let Ok(source) = fetcher.chain(role, &klobuchar) {
-                        sources.push(source);
+                    for (required, candidates) in daily_broadcast(options.at) {
+                        match fetcher.chain(role, &candidates) {
+                            Ok(source) => sources.push(source),
+                            Err(e) if required => return Err(e),
+                            Err(_) => {}
+                        }
                     }
                     sources.push(
                         fetcher
@@ -467,6 +465,34 @@ pub fn provider(role: Role) -> &'static str {
         Role::GalileoAlmanac => "gsc",
         Role::QzsAlmanac => "qzss-almanac",
     }
+}
+
+fn daily_broadcast(at: Instant) -> [(bool, Vec<(String, String)>); 3] {
+    let url = |pool: &str, kind: &str, day: chrono::DateTime<Utc>| {
+        (
+            "brdc".to_string(),
+            format!(
+                "https://igs.bkg.bund.de/root_ftp/{pool}/BRDC/{}/{:03}/BRDC00WRD_{kind}_{}0000_01D_MN.rnx.gz",
+                day.year(),
+                day.ordinal(),
+                day.format("%Y%j")
+            ),
+        )
+    };
+    let daily = |day| {
+        [("IGS", "S"), ("MGEX", "S"), ("IGS", "R"), ("EUREF", "R")]
+            .map(|(pool, kind)| url(pool, kind, day))
+            .to_vec()
+    };
+    let previous_day = at.0 - chrono::Duration::days(1);
+    [
+        (true, daily(previous_day)),
+        (false, daily(at.0)),
+        (
+            false,
+            vec![url("EUREF", "R", at.0), url("EUREF", "R", previous_day)],
+        ),
+    ]
 }
 
 fn candidates(role: Role, at: Instant) -> Vec<(String, String)> {
@@ -619,6 +645,32 @@ mod tests {
             urls[3].1,
             "https://zhw-b.s3.cloud.switch.ch/aiub/CODE/COD.EPH_U"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_previous_day_broadcast_file_is_required() -> Result<()> {
+        let files = daily_broadcast(Instant::parse("2026-01-01T00:08:00Z")?);
+        let days: Vec<_> = files
+            .iter()
+            .map(|(required, urls)| (*required, urls[0].1.rsplit('_').nth(2).map(str::to_owned)))
+            .collect();
+        assert_eq!(
+            days,
+            [
+                (true, Some("20253650000".to_owned())),
+                (false, Some("20260010000".to_owned())),
+                (false, Some("20260010000".to_owned())),
+            ]
+        );
+        assert!(files[0].1[0].1.contains("/IGS/BRDC/2025/365/BRDC00WRD_S_"));
+        assert!(
+            files[2]
+                .1
+                .iter()
+                .all(|(_, url)| url.contains("/EUREF/BRDC/"))
+        );
+        assert!(files[2].1[1].1.contains("/2025/365/BRDC00WRD_R_2025365"));
         Ok(())
     }
 

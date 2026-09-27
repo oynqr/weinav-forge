@@ -265,7 +265,10 @@ screening, AGNSS and Klobuchar data use all broadcast files. The newest
 Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
 Klobuchar coefficients. The fetcher therefore also gets that file for the
-build day, or for the day before, when it is available.
+build day, or for the day before, when it is available. The daily file of the
+day before is required. The daily file of the build day is used when BKG has
+published it: early in the UTC day it does not exist yet, and
+``brdc_last.rnx.Z`` then gives the last 24 hours.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
 time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
 2 hours away, in absolute time, as the external gate does. It also refuses a
