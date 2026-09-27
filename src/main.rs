@@ -279,7 +279,7 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"source-unavailable","at":at.0.to_rfc3339(),"envelopes_sha256":record::envelopes::GATE_SHA256,"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Source unavailable: {e:#}");
@@ -300,7 +300,7 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
             cache::atomic_write(
                 &report_path,
                 &serde_json::to_vec_pretty(
-                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
+                    &json!({"version":1,"status":"refused","at":at.0.to_rfc3339(),"envelopes_sha256":record::envelopes::GATE_SHA256,"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"error":format!("{e:#}")}),
                 )?,
             )?;
             eprintln!("Output refused: {e:#}");

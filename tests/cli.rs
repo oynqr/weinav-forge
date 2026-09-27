@@ -50,6 +50,10 @@ fn source_failure_removes_only_the_requested_staging_zip() -> Result<()> {
     assert_eq!(fs::read(published)?, b"keep the published generation");
     let report: Value = serde_json::from_slice(&fs::read(output.join("report.json"))?)?;
     assert_eq!(report["status"], "source-unavailable");
+    assert_eq!(
+        report["envelopes_sha256"],
+        weinav_forge::record::envelopes::GATE_SHA256
+    );
     Ok(())
 }
 
