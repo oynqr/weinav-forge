@@ -358,7 +358,7 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
         .iter()
         .map(|(n, b)| (n, cache::hash(b)))
         .collect();
-    let mut report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"envelopes_sha256":record::envelopes::GATE_SHA256,"agnss_glonass_omitted":products.agnss_glonass_omitted,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
+    let mut report = json!({"version":1,"status":status,"at":at.0.to_rfc3339(),"timestamp_ms":at.0.timestamp_millis(),"elapsed_seconds":started.elapsed().as_secs_f64(),"development_bypass":options.development_bypass_gates,"policy":Plan::new(flavor,&common.systems,!common.no_agnss),"sources":inputs.sources,"epochs":products.epochs,"notes":products.notes,"envelopes_sha256":record::envelopes::GATE_SHA256,"agnss_glonass_omitted":products.agnss_glonass_omitted,"klobuchar":products.klobuchar,"payload_sha256":file_hashes,"zip_sha256":packed.as_ref().map(|b|cache::hash(b)),"gate":checks});
     report
         .as_object_mut()
         .context("report is not a JSON object")?

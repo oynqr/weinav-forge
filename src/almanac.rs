@@ -63,6 +63,7 @@ pub fn build(
     gps: &[u8],
     galileo: &[u8],
     broadcast: &Broadcast,
+    ionosphere: Option<&crate::rtcm::Message>,
     at: Instant,
 ) -> Result<(Vec<u8>, Vec<String>)> {
     let mut out = vec![0; extra::LENGTH];
@@ -70,8 +71,8 @@ pub fn build(
     for (offset, tag) in [(0x18, 1_u32), (0x238, 1), (0x340, 3), (0x448, 2)] {
         out[offset..offset + 4].copy_from_slice(&tag.to_le_bytes());
     }
-    if let Some(ion) = agnss::ionosphere(broadcast) {
-        out[16..24].copy_from_slice(&ion.encode()?[3..11]);
+    if let Some(ion) = ionosphere {
+        out[16..24].copy_from_slice(&agnss::raw_coefficients(ion)?.map(|raw| raw as u8));
     } else {
         notes.push("EXTRA: GPS ionosphere coefficients are absent".into());
     }

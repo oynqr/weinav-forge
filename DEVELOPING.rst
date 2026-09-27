@@ -261,14 +261,26 @@ The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external
 gate can repeat each decision from the published file. The processor writes
 a copy of this file next to the report only when the checks pass. Orbit
-screening, AGNSS and Klobuchar data use all broadcast files. The newest
-Klobuchar record wins, from a RINEX 3 header or a RINEX 4 ``ION`` record.
+screening and AGNSS use all broadcast files. The daily file of the day before
+is required. The daily file of the build day is used when BKG has published
+it: early in the UTC day it does not exist yet, and ``brdc_last.rnx.Z`` then
+gives the last 24 hours.
+
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
-Klobuchar coefficients. The fetcher therefore also gets that file for the
-build day, or for the day before, when it is available. The daily file of the
-day before is required. The daily file of the build day is used when BKG has
-published it: early in the UTC day it does not exist yet, and
-``brdc_last.rnx.Z`` then gives the last 24 hours.
+Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
+role, for the build day or else for the day before. A file without the
+``GPSA`` and ``GPSB`` header lines is not available, and the fetcher then
+tries the day before. Early in the UTC day, the file of the build day has no
+such header. The builder reads only the Klobuchar coefficients from this
+file, not its records: its GR50 writer gives Galileo records an epoch that is
+not their ``toc``, and its GLONASS health differs from the health snapshot.
+AGNSS from broadcast and the partial EXTRA file use these coefficients. When
+the file is absent, they use the seed's ``gpsIon`` coefficients, if there is
+a seed. The seed's coefficients were two days older than their seed version
+when measured, and the header file is from the build day or the day before,
+so the header file comes first. When neither is available, message 4056 is
+absent. The report gives the source as ``klobuchar``: its provider, URL,
+SHA-256, the day of the daily file and the eight raw coefficients, or null.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
 time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
 2 hours away, in absolute time, as the external gate does. It also refuses a

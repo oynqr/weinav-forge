@@ -1,12 +1,24 @@
 use crate::{
     policy::System,
-    rinex::{Broadcast, Navigation},
+    rinex::{Broadcast, Klobuchar, Navigation},
     rtcm::{self, Message},
     time::Instant,
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{Datelike, TimeZone, Timelike, Utc};
+use serde::Serialize;
 use std::collections::BTreeMap;
+
+const KLOBUCHAR_MESSAGE_HEADER: [u8; 3] = [0xfd, 0x80, 0x06];
+
+#[derive(Clone, Debug, Serialize)]
+pub struct KlobucharSource {
+    pub provider: String,
+    pub url: String,
+    pub sha256: String,
+    pub day: Option<String>,
+    pub raw: [i8; 8],
+}
 
 fn ura(value: f64) -> f64 {
     let nominal = [
@@ -141,18 +153,41 @@ pub fn from_navigation(nav: &Navigation) -> Result<Message> {
     Ok(Message { number, values: v })
 }
 
-pub fn ionosphere(broadcast: &Broadcast) -> Option<Message> {
-    let klobuchar = broadcast.klobuchar?;
+pub fn ionosphere(klobuchar: &Klobuchar) -> Message {
     let mut values = BTreeMap::from([("tag".into(), 6.0)]);
     for (prefix, coefficients) in [("alpha", klobuchar.alpha), ("beta", klobuchar.beta)] {
         for (i, value) in coefficients.into_iter().enumerate() {
             values.insert(format!("{prefix}{i}"), value);
         }
     }
-    Some(Message {
+    Message {
         number: 4056,
         values,
-    })
+    }
+}
+
+pub fn seed_ionosphere(gps_ion: &[u8]) -> Result<Message> {
+    let mut payload = KLOBUCHAR_MESSAGE_HEADER.to_vec();
+    payload.extend_from_slice(gps_ion.get(..8).context("short gpsIon")?);
+    Message::decode(&payload)
+}
+
+pub fn raw_coefficients(message: &Message) -> Result<[i8; 8]> {
+    let payload = message.encode()?;
+    let coefficients: [u8; 8] = payload
+        .get(KLOBUCHAR_MESSAGE_HEADER.len()..)
+        .context("short message 4056")?
+        .try_into()?;
+    Ok(coefficients.map(|byte| byte as i8))
+}
+
+pub fn daily_file_day(url: &str) -> Option<String> {
+    let name = url.rsplit('/').next()?;
+    let stamp = name
+        .split('_')
+        .find(|part| part.len() == 11 && part.bytes().all(|b| b.is_ascii_digit()))?;
+    chrono::NaiveDate::from_yo_opt(stamp[..4].parse().ok()?, stamp[4..7].parse().ok()?)
+        .map(|day| day.to_string())
 }
 
 const TRANSMISSION_LEAD_S: f64 = 7200.0;
@@ -170,6 +205,7 @@ pub fn build(
     broadcast: &Broadcast,
     systems: &[System],
     at: Instant,
+    ionosphere: Option<&Message>,
 ) -> Result<(Vec<u8>, Vec<String>, usize)> {
     let mut out = Vec::new();
     let mut notes = Vec::new();
@@ -217,7 +253,7 @@ pub fn build(
             ));
         }
     }
-    match ionosphere(broadcast) {
+    match ionosphere {
         Some(message) => out.extend(rtcm::frame(&message.encode()?)?),
         None => notes.push("AGNSS: GPS ionosphere coefficients are absent".into()),
     }

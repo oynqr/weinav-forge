@@ -32,6 +32,7 @@ fn a_full_length_zero_census_is_refused() -> Result<()> {
         notes: vec![],
         screened: 0,
         agnss_glonass_omitted: None,
+        klobuchar: None,
     };
     let gate = gate::inspect(
         &products,
@@ -84,6 +85,7 @@ fn empty_inputs() -> Inputs {
         predictions: BTreeMap::new(),
         antex: None,
         raw: BTreeMap::new(),
+        ionosphere: None,
     }
 }
 
@@ -139,6 +141,7 @@ fn live_block_census_allows_screening_but_rejects_sparse_output() -> Result<()> 
                 notes: vec![],
                 screened: 0,
                 agnss_glonass_omitted: None,
+                klobuchar: None,
             };
             let gate = gate::inspect(
                 &products,
@@ -201,6 +204,7 @@ fn declared_whole_grid_gaps_require_open_permission() -> Result<()> {
             notes: vec![],
             screened: 0,
             agnss_glonass_omitted: None,
+            klobuchar: None,
         };
         for permission in [false, true] {
             let gate = gate::inspect(

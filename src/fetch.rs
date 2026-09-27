@@ -20,6 +20,7 @@ use std::{
 };
 use url::Url;
 
+const BROADCAST_SNAPSHOT_URL: &str = "https://igs.bkg.bund.de/root_ftp/NTRIP/BRDC/brdc_last.rnx.Z";
 const CODE_BASE: &str = "https://zhw-b.s3.cloud.switch.ch/aiub/CODE";
 
 fn code_prediction_url(day: chrono::DateTime<Utc>) -> String {
@@ -96,6 +97,14 @@ pub fn inspect(role: Role, bytes: &[u8]) -> Result<Vec<Coverage>> {
         Role::Antex => {
             Antex::parse(bytes)?;
         }
+        Role::Ionosphere => {
+            let mut broadcast = Broadcast::default();
+            broadcast.add(bytes)?;
+            ensure!(
+                broadcast.klobuchar.is_some(),
+                "no GPS Klobuchar coefficients in the RINEX file"
+            );
+        }
         Role::GpsAlmanac | Role::QzsAlmanac => {
             let bytes = decompress(bytes)?;
             let text = std::str::from_utf8(&bytes)?;
@@ -142,7 +151,7 @@ impl<'a> Fetcher<'a> {
             if self.offline || (0..120).contains(&age) {
                 let bytes = cache::load_source(self.root, cached)?;
                 if check {
-                    validate(role, &bytes)?;
+                    validate(role, &bytes).with_context(|| format!("invalid source from {url}"))?;
                 }
                 self.attempts.push(format!("cache: {url}"));
                 let mut source = cached.clone();
@@ -235,6 +244,26 @@ impl<'a> Fetcher<'a> {
             }
         }
         bail!("{role:?} unavailable: {}", errors.join("; "))
+    }
+
+    fn broadcast(&mut self, at: Instant) -> Result<Vec<Source>> {
+        let mut sources = Vec::new();
+        for (required, candidates) in daily_broadcast(at) {
+            match self.chain(Role::Broadcast, &candidates) {
+                Ok(source) => sources.push(source),
+                Err(e) if required => return Err(e),
+                Err(_) => {}
+            }
+        }
+        sources.push(
+            self.get(BROADCAST_SNAPSHOT_URL, Role::Broadcast, "brdc", true)?
+                .0,
+        );
+        Ok(sources)
+    }
+
+    fn klobuchar_header(&mut self, at: Instant) -> Option<Source> {
+        self.chain(Role::Ionosphere, &klobuchar_header(at)).ok()
     }
 }
 
@@ -380,25 +409,8 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         )?,
                     );
                 }
-                Role::Broadcast => {
-                    for (required, candidates) in daily_broadcast(options.at) {
-                        match fetcher.chain(role, &candidates) {
-                            Ok(source) => sources.push(source),
-                            Err(e) if required => return Err(e),
-                            Err(_) => {}
-                        }
-                    }
-                    sources.push(
-                        fetcher
-                            .get(
-                                "https://igs.bkg.bund.de/root_ftp/NTRIP/BRDC/brdc_last.rnx.Z",
-                                role,
-                                "brdc",
-                                true,
-                            )?
-                            .0,
-                    );
-                }
+                Role::Broadcast => sources.extend(fetcher.broadcast(options.at)?),
+                Role::Ionosphere => sources.extend(fetcher.klobuchar_header(options.at)),
                 Role::Prediction => {
                     let source = fetcher.chain(role, &candidates(role, options.at))?;
                     if source.provider == "code5d" {
@@ -464,35 +476,44 @@ pub fn provider(role: Role) -> &'static str {
         Role::GpsAlmanac => "navcen",
         Role::GalileoAlmanac => "gsc",
         Role::QzsAlmanac => "qzss-almanac",
+        Role::Ionosphere => "brdc-header",
     }
 }
 
-fn daily_broadcast(at: Instant) -> [(bool, Vec<(String, String)>); 3] {
-    let url = |pool: &str, kind: &str, day: chrono::DateTime<Utc>| {
-        (
-            "brdc".to_string(),
-            format!(
-                "https://igs.bkg.bund.de/root_ftp/{pool}/BRDC/{}/{:03}/BRDC00WRD_{kind}_{}0000_01D_MN.rnx.gz",
-                day.year(),
-                day.ordinal(),
-                day.format("%Y%j")
-            ),
-        )
-    };
+fn daily_url(
+    provider: &str,
+    pool: &str,
+    kind: &str,
+    day: chrono::DateTime<Utc>,
+) -> (String, String) {
+    (
+        provider.to_string(),
+        format!(
+            "https://igs.bkg.bund.de/root_ftp/{pool}/BRDC/{}/{:03}/BRDC00WRD_{kind}_{}0000_01D_MN.rnx.gz",
+            day.year(),
+            day.ordinal(),
+            day.format("%Y%j")
+        ),
+    )
+}
+
+fn daily_broadcast(at: Instant) -> [(bool, Vec<(String, String)>); 2] {
     let daily = |day| {
-        [("IGS", "S"), ("MGEX", "S"), ("IGS", "R"), ("EUREF", "R")]
-            .map(|(pool, kind)| url(pool, kind, day))
+        [("IGS", "S"), ("MGEX", "S"), ("IGS", "R")]
+            .map(|(pool, kind)| daily_url("brdc", pool, kind, day))
             .to_vec()
     };
-    let previous_day = at.0 - chrono::Duration::days(1);
     [
-        (true, daily(previous_day)),
+        (true, daily(at.0 - chrono::Duration::days(1))),
         (false, daily(at.0)),
-        (
-            false,
-            vec![url("EUREF", "R", at.0), url("EUREF", "R", previous_day)],
-        ),
     ]
+}
+
+fn klobuchar_header(at: Instant) -> Vec<(String, String)> {
+    let provider = provider(Role::Ionosphere);
+    [at.0, at.0 - chrono::Duration::days(1)]
+        .map(|day| daily_url(provider, "EUREF", "R", day))
+        .to_vec()
 }
 
 fn candidates(role: Role, at: Instant) -> Vec<(String, String)> {
@@ -650,7 +671,8 @@ mod tests {
 
     #[test]
     fn only_the_previous_day_broadcast_file_is_required() -> Result<()> {
-        let files = daily_broadcast(Instant::parse("2026-01-01T00:08:00Z")?);
+        let at = Instant::parse("2026-01-01T00:08:00Z")?;
+        let files = daily_broadcast(at);
         let days: Vec<_> = files
             .iter()
             .map(|(required, urls)| (*required, urls[0].1.rsplit('_').nth(2).map(str::to_owned)))
@@ -660,17 +682,128 @@ mod tests {
             [
                 (true, Some("20253650000".to_owned())),
                 (false, Some("20260010000".to_owned())),
-                (false, Some("20260010000".to_owned())),
             ]
         );
         assert!(files[0].1[0].1.contains("/IGS/BRDC/2025/365/BRDC00WRD_S_"));
         assert!(
-            files[2]
-                .1
+            files
                 .iter()
-                .all(|(_, url)| url.contains("/EUREF/BRDC/"))
+                .flat_map(|(_, urls)| urls)
+                .all(|(_, url)| !url.contains("/EUREF/"))
         );
-        assert!(files[2].1[1].1.contains("/2025/365/BRDC00WRD_R_2025365"));
+        let header = klobuchar_header(at);
+        assert!(
+            header[0]
+                .1
+                .contains("/EUREF/BRDC/2026/001/BRDC00WRD_R_2026001")
+        );
+        assert!(
+            header[1]
+                .1
+                .contains("/EUREF/BRDC/2025/365/BRDC00WRD_R_2025365")
+        );
+        Ok(())
+    }
+
+    fn navigation(header: &str) -> Vec<u8> {
+        let mut text = format!(
+            "{:>9}{:51}RINEX VERSION / TYPE\n{header}{:60}END OF HEADER\n",
+            "3.05", "", ""
+        );
+        text.push_str(&format!(
+            "G01 2025 12 31 22 00 00{:19.12E}{:19.12E}{:19.12E}\n",
+            0.0, 0.0, 0.0
+        ));
+        for _ in 0..7 {
+            text.push_str(&format!(
+                "    {:19.12E}{:19.12E}{:19.12E}{:19.12E}\n",
+                1.0, 1.0, 1.0, 1.0
+            ));
+        }
+        text.into_bytes()
+    }
+
+    fn offline_copy(root: &Path, url: &str, role: Role, bytes: &[u8]) -> Result<()> {
+        let source = Source {
+            role,
+            provider: provider(role).into(),
+            url: url.into(),
+            sha256: cache::hash(bytes),
+            bytes: bytes.len(),
+            fetched_at: Utc::now().to_rfc3339(),
+            etag: None,
+            last_modified: None,
+            coverage: Vec::new(),
+            version: None,
+        };
+        cache::store_source(root, &source, bytes)?;
+        cache::atomic_write(
+            &root
+                .join("urls")
+                .join(format!("{}.json", cache::hash(url.as_bytes()))),
+            &serde_json::to_vec(&source)?,
+        )
+    }
+
+    #[test]
+    fn missing_build_day_files_leave_the_day_before_and_its_klobuchar_header() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let at = Instant::parse("2026-01-01T00:08:00Z")?;
+        let with_header = navigation(&format!(
+            "GPSA {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\nGPSB {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\n",
+            1e-8, 0.0, 0.0, 0.0, "", 9e4, 0.0, 0.0, 0.0, ""
+        ));
+        let without_header = navigation("");
+        let previous_day = daily_broadcast(at)[0].1[0].1.clone();
+        let header_urls: Vec<_> = klobuchar_header(at)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect();
+        let [build_day_header, previous_day_header] = <[String; 2]>::try_from(header_urls)
+            .map_err(|_| anyhow::anyhow!("two Klobuchar header candidates"))?;
+        offline_copy(root.path(), &previous_day, Role::Broadcast, &without_header)?;
+        offline_copy(
+            root.path(),
+            BROADCAST_SNAPSHOT_URL,
+            Role::Broadcast,
+            &without_header,
+        )?;
+        offline_copy(
+            root.path(),
+            &build_day_header,
+            Role::Ionosphere,
+            &without_header,
+        )?;
+        offline_copy(
+            root.path(),
+            &previous_day_header,
+            Role::Ionosphere,
+            &with_header,
+        )?;
+        let mut fetcher = Fetcher {
+            root: root.path(),
+            client: None,
+            offline: true,
+            attempts: vec![],
+        };
+        let mut sources = fetcher.broadcast(at)?;
+        sources.extend(fetcher.klobuchar_header(at));
+        let fetched: Vec<_> = sources.iter().map(|s| (s.role, s.url.as_str())).collect();
+        assert_eq!(
+            fetched,
+            [
+                (Role::Broadcast, previous_day.as_str()),
+                (Role::Broadcast, BROADCAST_SNAPSHOT_URL),
+                (Role::Ionosphere, previous_day_header.as_str()),
+            ]
+        );
+        assert!(Role::Broadcast < Role::Ionosphere);
+        assert!(
+            fetcher
+                .attempts
+                .iter()
+                .any(|a| a.contains(&build_day_header) && a.contains("Klobuchar"))
+        );
         Ok(())
     }
 

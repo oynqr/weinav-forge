@@ -113,6 +113,7 @@ pub enum Role {
     GpsAlmanac,
     GalileoAlmanac,
     QzsAlmanac,
+    Ionosphere,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,6 +215,9 @@ impl Plan {
         if flavor == Flavor::Open {
             sources.extend([Role::GpsAlmanac, Role::GalileoAlmanac]);
         }
+        if agnss && !matches!(flavor, Flavor::Huawei | Flavor::HuaweiPlus) {
+            sources.insert(Role::Ionosphere);
+        }
         Self {
             flavor,
             products,
@@ -265,6 +269,8 @@ mod tests {
         let open = Plan::new(Flavor::Open, &System::ALL, true);
         assert!(!open.sources.contains(&Role::Seed));
         assert!(!open.sources.contains(&Role::Agnss));
+        assert!(open.sources.contains(&Role::Ionosphere));
+        assert!(!h.sources.contains(&Role::Ionosphere));
         assert!(open.degraded_permission_required);
         let huawei = Plan::new(Flavor::Huawei, &[System::Gps], false);
         assert_eq!(

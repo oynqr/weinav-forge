@@ -28,6 +28,7 @@ pub struct Inputs {
     pub predictions: BTreeMap<Role, Sp3>,
     pub antex: Option<Antex>,
     pub raw: BTreeMap<Role, Vec<Vec<u8>>>,
+    pub ionosphere: Option<crate::rinex::Klobuchar>,
 }
 
 impl Inputs {
@@ -103,7 +104,10 @@ impl Inputs {
                 inputs.sources.iter().any(|source| source.role == role)
                     || matches!(
                         role,
-                        Role::Prediction | Role::BdsPrediction | Role::QzsPrediction
+                        Role::Prediction
+                            | Role::BdsPrediction
+                            | Role::QzsPrediction
+                            | Role::Ionosphere
                     ),
                 "required source is absent: {role:?}"
             );
@@ -138,6 +142,16 @@ impl Inputs {
             Role::Antex => {
                 ensure!(self.antex.is_none(), "supply one ANTEX file");
                 self.antex = Some(Antex::parse(&bytes)?);
+            }
+            Role::Ionosphere => {
+                ensure!(self.ionosphere.is_none(), "supply one ionosphere file");
+                let mut header = Broadcast::default();
+                header.add(&bytes)?;
+                self.ionosphere = Some(
+                    header
+                        .klobuchar
+                        .context("no GPS Klobuchar coefficients in the RINEX file")?,
+                );
             }
             Role::Agnss | Role::GpsAlmanac | Role::GalileoAlmanac | Role::QzsAlmanac => {
                 self.raw.entry(role).or_default().push(bytes);
@@ -226,6 +240,36 @@ impl Inputs {
                 .context("ANTEX absent")?
                 .correct((system, id), time, state)
         }
+    }
+
+    pub fn klobuchar(
+        &self,
+    ) -> Result<Option<(crate::rtcm::Message, crate::agnss::KlobucharSource)>> {
+        let (message, role, day) = if let Some(klobuchar) = &self.ionosphere {
+            (crate::agnss::ionosphere(klobuchar), Role::Ionosphere, true)
+        } else if let Some(gps_ion) = self.seed.as_ref().and_then(|s| s.fields.get("gpsIon")) {
+            (crate::agnss::seed_ionosphere(gps_ion)?, Role::Seed, false)
+        } else {
+            return Ok(None);
+        };
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.role == role)
+            .context("Klobuchar source is not in the manifest")?;
+        let raw = crate::agnss::raw_coefficients(&message)?;
+        Ok(Some((
+            message,
+            crate::agnss::KlobucharSource {
+                provider: source.provider.clone(),
+                url: source.url.clone(),
+                sha256: source.sha256.clone(),
+                day: day
+                    .then(|| crate::agnss::daily_file_day(&source.url))
+                    .flatten(),
+                raw,
+            },
+        )))
     }
 
     pub fn health_source(&self) -> Option<&Source> {
@@ -337,6 +381,7 @@ pub struct Products {
     pub notes: Vec<String>,
     pub screened: usize,
     pub agnss_glonass_omitted: Option<usize>,
+    pub klobuchar: Option<crate::agnss::KlobucharSource>,
 }
 
 fn clock_fit(samples: &[(f64, State)]) -> Result<[f64; 3]> {
@@ -507,6 +552,7 @@ pub fn assemble(
         notes: Vec::new(),
         screened: 0,
         agnss_glonass_omitted: None,
+        klobuchar: None,
     };
     if let Some(seed) = &inputs.seed {
         ensure!(
@@ -540,10 +586,12 @@ pub fn assemble(
                 .push("QZSS: final seed coefficient uses four documented zero padding bits".into());
         }
     } else {
+        let klobuchar = inputs.klobuchar()?;
         let (extra, notes) = crate::almanac::build(
             &inputs.raw[&Role::GpsAlmanac][0],
             &inputs.raw[&Role::GalileoAlmanac][0],
             &inputs.broadcast,
+            klobuchar.as_ref().map(|(message, _)| message),
             at,
         )?;
         product.files.insert("HW_PGNSS_EXTRA".into(), extra);
@@ -553,9 +601,16 @@ pub fn assemble(
         let bytes = if matches!(flavor, Flavor::Huawei | Flavor::HuaweiPlus) {
             crate::seed::decompress(&inputs.raw[&Role::Agnss][0])?.into_owned()
         } else {
-            let (bytes, notes, omitted) = crate::agnss::build(&inputs.broadcast, systems, at)?;
+            let klobuchar = inputs.klobuchar()?;
+            let (bytes, notes, omitted) = crate::agnss::build(
+                &inputs.broadcast,
+                systems,
+                at,
+                klobuchar.as_ref().map(|(message, _)| message),
+            )?;
             product.notes.extend(notes);
             product.agnss_glonass_omitted = Some(omitted);
+            product.klobuchar = klobuchar.map(|(_, source)| source);
             bytes
         };
         product.notes.extend(crate::agnss::validate_fresh(

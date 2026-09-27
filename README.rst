@@ -87,6 +87,10 @@ The local files replace cached files for that role. Roles are:
 * ``prediction``, ``bds-prediction``, ``qzs-prediction``
 * ``broadcast``, ``antex``
 * ``gps-almanac``, ``galileo-almanac``
+* ``ionosphere``
+
+The ``ionosphere`` role gives only the GPS Klobuchar coefficients of a RINEX
+file header. The records in that file are not used.
 
 For example:
 

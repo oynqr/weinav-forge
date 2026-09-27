@@ -625,7 +625,7 @@ fn reviewed_open_agnss_ages_out_with_the_glonass_broadcast() -> Result<()> {
         root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz"),
     )?)?;
     let at = Instant::parse("2026-09-26T05:43:07Z")?;
-    let (bytes, _, _) = agnss::build(&broadcast, &System::ALL, at)?;
+    let (bytes, _, _) = agnss::build(&broadcast, &System::ALL, at, None)?;
     agnss::validate_fresh(&bytes, at, true)?;
     agnss::validate_fresh(&bytes, Instant::parse("2026-09-26T06:14:00Z")?, true)?;
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
@@ -654,12 +654,12 @@ fn reviewed_open_agnss_omits_only_stale_glonass() -> Result<()> {
         Ok(count)
     };
     let fresh = Instant::parse("2026-09-26T06:14:00Z")?;
-    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, fresh)?;
+    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, fresh, None)?;
     assert!(count(&bytes, 1020)? > 0);
     assert_eq!(omitted, 0);
     assert!(!notes.iter().any(|n| n.contains("omitted")), "{notes:?}");
     let late = Instant::parse("2026-09-26T06:16:00Z")?;
-    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, late)?;
+    let (bytes, notes, omitted) = agnss::build(&broadcast, &System::ALL, late, None)?;
     agnss::validate_fresh(&bytes, late, true)?;
     assert_eq!(count(&bytes, 1020)?, 0);
     assert!(omitted > 0);
@@ -670,6 +670,77 @@ fn reviewed_open_agnss_omits_only_stale_glonass() -> Result<()> {
             .any(|n| n.contains("GLONASS") && n.contains("omitted")),
         "{notes:?}"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the author's reviewed broadcast files"]
+fn reviewed_klobuchar_header_file_changes_only_message_4056() -> Result<()> {
+    use weinav_forge::{
+        agnss,
+        build::Inputs,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    )
+    .join("klobuchar_2309");
+    let at = Instant::parse("2026-09-26T23:11:23Z")?;
+    let daily_and_snapshot = [
+        "BRDC00WRD_S_20262680000_01D_MN.rnx.gz",
+        "BRDC00WRD_S_20262690000_01D_MN.rnx.gz",
+        "brdc_last.rnx.Z",
+    ]
+    .map(|name| root.join(name))
+    .to_vec();
+    let euref = root.join("BRDC00WRD_R_20262690000_01D_MN.rnx.gz");
+    let cache = tempfile::tempdir()?;
+    let open_agnss = |broadcast: Vec<PathBuf>,
+                      header: Option<&PathBuf>|
+     -> Result<(Vec<Vec<u8>>, Option<agnss::KlobucharSource>)> {
+        let mut local = BTreeMap::from([
+            (Role::Broadcast, broadcast),
+            (Role::GpsAlmanac, vec![root.join("current_yuma.alm")]),
+            (Role::GalileoAlmanac, vec![root.join("galileo_almanac.xml")]),
+        ]);
+        if let Some(header) = header {
+            local.insert(Role::Ionosphere, vec![header.clone()]);
+        }
+        let inputs = Inputs::load(cache.path(), None, Flavor::Open, &[], true, &local)?;
+        let klobuchar = inputs.klobuchar()?;
+        let (bytes, _, _) = agnss::build(
+            &inputs.broadcast,
+            &System::ALL,
+            at,
+            klobuchar.as_ref().map(|(message, _)| message),
+        )?;
+        let payloads = rtcm::payloads(&bytes)?
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        Ok((payloads, klobuchar.map(|(_, source)| source)))
+    };
+    let is_klobuchar = |payload: &Vec<u8>| -> bool {
+        rtcm::Message::decode(payload).is_ok_and(|message| message.number == 4056)
+    };
+    let (with_header, source) = open_agnss(daily_and_snapshot.clone(), Some(&euref))?;
+    let (without_header, none) = open_agnss(daily_and_snapshot.clone(), None)?;
+    assert!(none.is_none());
+    assert_eq!(with_header.iter().filter(|p| is_klobuchar(p)).count(), 1);
+    assert!(!without_header.iter().any(is_klobuchar));
+    let others: Vec<_> = with_header.iter().filter(|p| !is_klobuchar(p)).collect();
+    assert_eq!(others, without_header.iter().collect::<Vec<_>>());
+    let source = source.context("Klobuchar source")?;
+    assert_eq!(source.day.as_deref(), Some("2026-09-26"));
+    assert_eq!(source.provider, "brdc-header");
+    assert_eq!(source.raw, [18, 2, -2, -2, 56, 2, -4, 1]);
+
+    let mut euref_as_broadcast = daily_and_snapshot;
+    euref_as_broadcast.insert(2, euref);
+    let (merged, _) = open_agnss(euref_as_broadcast, None)?;
+    assert_ne!(merged, without_header);
     Ok(())
 }
 
