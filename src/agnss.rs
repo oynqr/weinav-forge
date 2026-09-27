@@ -218,7 +218,10 @@ pub fn build(
         let mut ages = Vec::new();
         let mut stale = 0;
         for id in 1..=system.slots() as u8 {
-            if let Some(nav) = broadcast.nearest(system, id, now).filter(|n| n.healthy()) {
+            if let Some(nav) = broadcast
+                .nearest_toe(system, id, now)
+                .filter(|n| n.healthy())
+            {
                 let age = now - nav.epoch;
                 if system == System::Glonass && age.abs() > age_limit(1020) {
                     stale += 1;

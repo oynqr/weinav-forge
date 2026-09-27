@@ -315,13 +315,19 @@ impl Broadcast {
             .get(&(system, svid))
             .into_iter()
             .flatten()
-            .filter(move |r| {
-                (r.epoch - time).abs() <= 7200.0
-                    && (system != System::Galileo
-                        || r.values
-                            .get("data_sources")
-                            .is_some_and(|v| (*v as u32) & 2 != 0))
-            })
+            .filter(move |r| (r.epoch - time).abs() <= FRESH_WINDOW_S && carries_fnav(system, r))
+    }
+
+    pub fn nearest_toe(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
+        self.records
+            .get(&(system, svid))
+            .into_iter()
+            .flatten()
+            .filter(|r| carries_fnav(system, r))
+            .filter_map(|r| Some((r, (r.toe().ok()? - time).abs())))
+            .filter(|(_, distance)| *distance <= FRESH_WINDOW_S)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(r, _)| r)
     }
 
     pub fn nearest(&self, system: System, svid: u8, time: f64) -> Option<&Navigation> {
@@ -333,6 +339,16 @@ impl Broadcast {
         self.fresh(system, svid, time)
             .max_by(|a, b| a.epoch.total_cmp(&b.epoch))
     }
+}
+
+const FRESH_WINDOW_S: f64 = 7200.0;
+
+fn carries_fnav(system: System, record: &Navigation) -> bool {
+    system != System::Galileo
+        || record
+            .values
+            .get("data_sources")
+            .is_some_and(|v| (*v as u32) & 2 != 0)
 }
 
 impl Navigation {
@@ -539,6 +555,59 @@ mod tests {
         let epoch = |nav: Option<&Navigation>| nav.map(|n| n.epoch - at);
         assert_eq!(epoch(broadcast.nearest(System::Gps, 1, at)), Some(-1200.0));
         assert_eq!(epoch(broadcast.newest(System::Gps, 1, at)), Some(2400.0));
+        Ok(())
+    }
+
+    fn galileo(hour: u32, minute: u32, toe: f64) -> Vec<u8> {
+        let names = super::schema::names('E').unwrap();
+        let value = |name: &str| match name {
+            "toe" => toe,
+            "data_sources" => 258.0,
+            "sv_health" => 0.0,
+            _ => 1.0,
+        };
+        let mut text = format!(
+            "{:>9}{:51}RINEX VERSION / TYPE\n{:60}END OF HEADER\nE11 2026 09 26 {hour:02} {minute:02} 00",
+            "3.05", "", ""
+        );
+        for (index, name) in names.iter().enumerate() {
+            if index >= 3 && (index - 3) % 4 == 0 {
+                text.push_str("\n    ");
+            }
+            text.push_str(&format!("{:19.12E}", value(name)));
+        }
+        text.push('\n');
+        text.into_bytes()
+    }
+
+    #[test]
+    fn galileo_records_are_selected_by_toe_not_by_epoch() -> Result<()> {
+        let saturday = 6.0 * 86400.0;
+        let at = (Utc
+            .with_ymd_and_hms(2026, 9, 26, 6, 0, 0)
+            .unwrap()
+            .timestamp()
+            - GPS_EPOCH_UNIX) as f64;
+        let mut broadcast = Broadcast::default();
+        broadcast.add(&galileo(5, 20, saturday + 5.0 * 3600.0 + 20.0 * 60.0))?;
+        broadcast.add(&galileo(5, 50, saturday + 3.0 * 3600.0 + 30.0 * 60.0))?;
+        let toe_age = |nav: Option<&Navigation>| nav.map(|n| n.toe().unwrap() - at);
+        assert_eq!(
+            toe_age(broadcast.nearest(System::Galileo, 11, at)),
+            Some(-9000.0)
+        );
+        assert_eq!(
+            toe_age(broadcast.nearest_toe(System::Galileo, 11, at)),
+            Some(-2400.0)
+        );
+        let mut restamped_only = Broadcast::default();
+        restamped_only.add(&galileo(5, 50, saturday + 3.0 * 3600.0 + 30.0 * 60.0))?;
+        assert!(restamped_only.nearest(System::Galileo, 11, at).is_some());
+        assert!(
+            restamped_only
+                .nearest_toe(System::Galileo, 11, at)
+                .is_none()
+        );
         Ok(())
     }
 

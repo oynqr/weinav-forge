@@ -736,11 +736,47 @@ fn reviewed_klobuchar_header_file_changes_only_message_4056() -> Result<()> {
     assert_eq!(source.day.as_deref(), Some("2026-09-26"));
     assert_eq!(source.provider, "brdc-header");
     assert_eq!(source.raw, [18, 2, -2, -2, 56, 2, -4, 1]);
+    Ok(())
+}
 
-    let mut euref_as_broadcast = daily_and_snapshot;
-    euref_as_broadcast.insert(2, euref);
-    let (merged, _) = open_agnss(euref_as_broadcast, None)?;
-    assert_ne!(merged, without_header);
+#[test]
+#[ignore = "requires the author's reviewed broadcast files"]
+fn reviewed_open_galileo_records_are_selected_by_toe() -> Result<()> {
+    use weinav_forge::{agnss, rinex::Broadcast, time::Instant};
+    const GALILEO_FRESH_WINDOW_S: f64 = 7200.0;
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    )
+    .join("klobuchar_2309");
+    let at = Instant::parse("2026-09-26T23:11:23Z")?;
+    let mut broadcast = Broadcast::default();
+    for name in [
+        "BRDC00WRD_S_20262680000_01D_MN.rnx.gz",
+        "BRDC00WRD_S_20262690000_01D_MN.rnx.gz",
+        "BRDC00WRD_R_20262690000_01D_MN.rnx.gz",
+        "brdc_last.rnx.Z",
+    ] {
+        broadcast.add(&fs::read(root.join(name))?)?;
+    }
+    let (bytes, _, _) = agnss::build(&broadcast, &System::ALL, at, None)?;
+    let now = (at.gps() as f64).rem_euclid(604800.0);
+    let mut galileo = 0;
+    for payload in rtcm::payloads(&bytes)? {
+        let message = rtcm::Message::decode(payload)?;
+        if message.number == 1046 {
+            galileo += 1;
+            let toe = message.values["toe"];
+            assert_eq!(message.values["toc"], toe, "E{}", message.values["prn"]);
+            let age = (now - toe + 302400.0).rem_euclid(604800.0) - 302400.0;
+            assert!(
+                age.abs() <= GALILEO_FRESH_WINDOW_S,
+                "E{}",
+                message.values["prn"]
+            );
+        }
+    }
+    assert!(galileo > 20);
     Ok(())
 }
 

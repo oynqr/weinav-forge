@@ -281,6 +281,10 @@ when measured, and the header file is from the build day or the day before,
 so the header file comes first. When neither is available, message 4056 is
 absent. The report gives the source as ``klobuchar``: its provider, URL,
 SHA-256, the day of the daily file and the eight raw coefficients, or null.
+AGNSS from broadcast uses, for each satellite, the healthy record whose
+``toe`` is nearest to the build time, within 2 hours. It does not select by
+the RINEX epoch, because a Galileo record can have an epoch that is not its
+``toc``. For Galileo, only F/NAV records are used, as in Huawei's stream.
 The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
 time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
 2 hours away, in absolute time, as the external gate does. It also refuses a
