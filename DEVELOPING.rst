@@ -308,10 +308,11 @@ Galileo ``toe`` more than 4 hours away, which the external gate does not check,
 and a stream without a GPS ephemeris. Huawei's Galileo week and GLONASS day
 number are unreliable: Huawei's stream has carried the next Galileo week, and
 a GLONASS day from 8 days behind to 1 day ahead. For Huawei's AGNSS, the check
-therefore accepts those two fields within these bounds, and the report notes
-each such message; the time of week and the time of day must still be
-current. The external gate reads neither field. The week of GPS message 1019
-is the week in which the transmission of the data set started. A data set
+therefore accepts those two fields within these bounds, and the report gives
+the number of such messages for each size of the difference; the time of week
+and the time of day must still be current. The external gate reads neither
+field. The week of GPS message 1019 is the week in which the transmission of
+the data set started. A data set
 with a ``toe`` at the start of a week is transmitted from 2 hours before, and
 Huawei's stream then gives it the old week. For Huawei's AGNSS, the check
 therefore accepts the week before for a ``toe`` less than 2 hours into the
