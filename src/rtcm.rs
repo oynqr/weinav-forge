@@ -18,6 +18,7 @@ pub struct Field {
     pub bias: f64,
 }
 
+#[derive(Clone)]
 pub struct Message {
     pub number: u16,
     pub values: BTreeMap<String, f64>,

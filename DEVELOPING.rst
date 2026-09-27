@@ -278,7 +278,23 @@ number are unreliable: Huawei's stream has carried the next Galileo week, and
 a GLONASS day from 8 days behind to 1 day ahead. For Huawei's AGNSS, the check
 therefore accepts those two fields within these bounds, and the report notes
 each such message; the time of week and the time of day must still be
-current. The external gate reads neither field. When the builder makes AGNSS
+current. The external gate reads neither field. The week of GPS message 1019
+is the week in which the transmission of the data set started. A data set
+with a ``toe`` at the start of a week is transmitted from 2 hours before, and
+Huawei's stream then gives it the old week. For Huawei's AGNSS, the check
+therefore accepts the week before for a ``toe`` less than 2 hours into the
+week, as the external gate does, when both of these conditions are true:
+
+- a BeiDou ephemeris, or a GPS ephemeris with a ``toe`` 2 hours or more from
+  each end of the week, dates the stream;
+- no other GPS ephemeris has a ``toe`` of 0 with its own week, or, before the
+  new week starts, a ``toe`` less than 2 hours into the next week with that
+  week.
+
+The report notes the number of such messages. The builder writes the week of
+the ``toe``, and the check of the builder's own stream accepts only that week.
+
+When the builder makes AGNSS
 from broadcast, it omits each GLONASS
 ephemeris whose ``t_b`` is more than 30 minutes from the build time, because
 BKG publishes each new ``t_b`` a few minutes late. The report counts them in

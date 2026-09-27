@@ -416,6 +416,145 @@ fn reviewed_huawei_agnss_is_not_refused_for_its_dates() -> Result<()> {
     Ok(())
 }
 
+fn week_end_stream(name: &str) -> Result<Vec<rtcm::Message>> {
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let bytes = fs::read(root.join("week_end").join(name))?;
+    let bytes = weinav_forge::seed::decompress(&bytes)?;
+    rtcm::payloads(&bytes)?
+        .into_iter()
+        .map(rtcm::Message::decode)
+        .collect()
+}
+
+fn stream(messages: &[rtcm::Message]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for message in messages {
+        bytes.extend(rtcm::frame(&message.encode()?)?);
+    }
+    Ok(bytes)
+}
+
+fn huawei_refusal(messages: &[rtcm::Message], at: &str) -> Result<String> {
+    use weinav_forge::{agnss, time::Instant};
+    match agnss::validate_fresh(&stream(messages)?, Instant::parse(at)?, false) {
+        Ok(notes) => anyhow::bail!("accepted at {at}: {notes:?}"),
+        Err(error) => Ok(error.to_string()),
+    }
+}
+
+#[test]
+#[ignore = "requires the author's reviewed week-end AGNSS"]
+fn reviewed_week_end_gps_week_is_read_as_the_transmission_week() -> Result<()> {
+    use weinav_forge::{agnss, time::Instant};
+    const TRANSMISSION_LEAD_S: f64 = 7200.0;
+    const LAST_TOE_OF_WEEK: f64 = 604784.0;
+    const NEW_WEEK: f64 = 2438.0;
+    let huawei = week_end_stream("huawei-2026-09-26T22:11:31Z.agnss")?;
+    let open = week_end_stream("open-2026-09-26T23:09Z.rtcm")?;
+    let lagging = huawei
+        .iter()
+        .filter(|m| m.number == 1019 && m.values["toe"] < TRANSMISSION_LEAD_S)
+        .count();
+    assert_eq!(lagging, 28);
+    let note = format!("AGNSS: {lagging} GPS ephemerides carry the transmission week");
+    for at in ["2026-09-26T22:13:37Z", "2026-09-26T22:20:37Z"] {
+        let bytes = stream(&huawei)?;
+        let notes = agnss::validate_fresh(&bytes, Instant::parse(at)?, false)?;
+        assert!(notes.contains(&note), "{at}: {notes:?}");
+        assert!(agnss::validate_fresh(&bytes, Instant::parse(at)?, true).is_err());
+    }
+    let without_bds: Vec<_> = huawei
+        .iter()
+        .filter(|m| m.number != 1042)
+        .cloned()
+        .collect();
+    let reason = huawei_refusal(&without_bds, "2026-09-26T22:13:37Z")?;
+    assert!(reason.contains("no 1042 or mid-week 1019"), "{reason}");
+
+    let open_a_week_later: Vec<_> = open
+        .iter()
+        .filter(|m| {
+            !matches!(m.number, 1042 | 1046)
+                && !(m.number == 1019 && m.values["toe"] == LAST_TOE_OF_WEEK)
+        })
+        .cloned()
+        .collect();
+    let reason = huawei_refusal(&open_a_week_later, "2026-10-03T23:11:22Z")?;
+    assert!(reason.contains("no 1042 or mid-week 1019"), "{reason}");
+    let at = Instant::parse("2026-09-26T23:11:22Z")?;
+    assert!(agnss::validate_fresh(&stream(&open)?, at, false)?.is_empty());
+    let mut relabelled = open.clone();
+    let first_toe_zero = relabelled
+        .iter_mut()
+        .find(|m| m.number == 1019 && m.values["toe"] == 0.0)
+        .context("open 1019 with toe 0")?;
+    *first_toe_zero.values.get_mut("week").context("week")? -= 1.0;
+    let reason = huawei_refusal(&relabelled, "2026-09-26T23:11:22Z")?;
+    assert!(
+        reason.contains("27 carry the week of an early toe"),
+        "{reason}"
+    );
+
+    let gps_and_current_bds = |at: &str| -> Result<Vec<rtcm::Message>> {
+        let bdt = Instant::parse(at)?.gps() as f64 - 14.0;
+        let mut messages = Vec::new();
+        for message in &huawei {
+            let mut message = message.clone();
+            match message.number {
+                1019 => {}
+                1042 => {
+                    message
+                        .values
+                        .insert("toe".into(), (bdt.rem_euclid(604800.0) / 8.0).floor() * 8.0);
+                    message
+                        .values
+                        .insert("week".into(), (bdt / 604800.0).floor() - 1356.0);
+                }
+                _ => continue,
+            }
+            messages.push(message);
+        }
+        Ok(messages)
+    };
+    let gps_set = |toe: f64, week: f64| -> Result<rtcm::Message> {
+        let mut message = huawei
+            .iter()
+            .find(|m| m.number == 1019)
+            .context("Huawei 1019")?
+            .clone();
+        message.values.insert("prn".into(), 32.0);
+        message.values.insert("toe".into(), toe);
+        message
+            .values
+            .insert("week".into(), week.rem_euclid(1024.0));
+        Ok(message)
+    };
+    let after_rollover = "2026-09-27T00:20:05Z";
+    let mut cut_in = gps_and_current_bds(after_rollover)?;
+    cut_in.push(gps_set(7184.0, NEW_WEEK)?);
+    let notes = agnss::validate_fresh(&stream(&cut_in)?, Instant::parse(after_rollover)?, false)?;
+    assert!(notes.contains(&note), "{notes:?}");
+    let before_rollover = "2026-09-26T23:09:42Z";
+    let lagging_only = gps_and_current_bds(before_rollover)?;
+    let notes = agnss::validate_fresh(
+        &stream(&lagging_only)?,
+        Instant::parse(before_rollover)?,
+        false,
+    )?;
+    assert!(notes.contains(&note), "{notes:?}");
+    let mut labelled_ahead = lagging_only;
+    labelled_ahead.push(gps_set(3600.0, NEW_WEEK)?);
+    let reason = huawei_refusal(&labelled_ahead, before_rollover)?;
+    assert!(
+        reason.contains("1 carry the week of an early toe"),
+        "{reason}"
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires the author's reviewed seed and broadcast snapshot"]
 fn reviewed_flagged_arc_at_build_time_removes_only_nearby_records() -> Result<()> {

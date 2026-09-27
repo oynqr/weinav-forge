@@ -155,6 +155,8 @@ pub fn ionosphere(broadcast: &Broadcast) -> Option<Message> {
     })
 }
 
+const TRANSMISSION_LEAD_S: f64 = 7200.0;
+
 fn age_limit(number: u16) -> f64 {
     match number {
         1020 => 1800.0,
@@ -228,6 +230,10 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result
     let mut gps = 0;
     let mut weeks = BTreeMap::<i64, usize>::new();
     let mut days = BTreeMap::<i64, usize>::new();
+    let mut transmission_week = 0;
+    let mut anchors = 0;
+    let mut week_of_early_toe = 0;
+    let build_week = (now / 604800.0).floor();
     for payload in rtcm::payloads(bytes)? {
         let m = Message::decode(payload)?;
         let limit = age_limit(m.number);
@@ -246,6 +252,8 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result
                 let week = ((system_now + dt) / 604800.0).floor() - offset;
                 let difference =
                     (m.values["week"] - week + modulus / 2.0).rem_euclid(modulus) - modulus / 2.0;
+                let toe = m.values["toe"];
+                let early = toe < TRANSMISSION_LEAD_S;
                 if m.number == 1046 && !absolute_dates {
                     ensure!(
                         difference == 0.0 || difference == 1.0,
@@ -254,11 +262,19 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result
                     if difference != 0.0 {
                         *weeks.entry(difference as i64).or_default() += 1;
                     }
+                } else if m.number == 1019 && !absolute_dates && difference == -1.0 && early {
+                    transmission_week += 1;
                 } else {
                     ensure!(
                         difference == 0.0,
                         "stale AGNSS week in message {}",
                         m.number
+                    );
+                    let mid_week =
+                        (TRANSMISSION_LEAD_S..=604800.0 - TRANSMISSION_LEAD_S).contains(&toe);
+                    anchors += usize::from(m.number == 1042 || (m.number == 1019 && mid_week));
+                    week_of_early_toe += usize::from(
+                        m.number == 1019 && (toe == 0.0 || (early && week > build_week)),
                     );
                 }
                 gps += usize::from(m.number == 1019);
@@ -292,6 +308,19 @@ pub fn validate_fresh(bytes: &[u8], at: Instant, absolute_dates: bool) -> Result
     }
     ensure!(gps > 0, "no GPS ephemeris (1019) in AGNSS");
     let mut notes = Vec::new();
+    if transmission_week > 0 {
+        ensure!(
+            anchors > 0,
+            "AGNSS: {transmission_week} GPS ephemerides carry the week before their toe, and no 1042 or mid-week 1019 dates the stream"
+        );
+        ensure!(
+            week_of_early_toe == 0,
+            "AGNSS: {transmission_week} GPS ephemerides carry the week before their toe, but {week_of_early_toe} carry the week of an early toe"
+        );
+        notes.push(format!(
+            "AGNSS: {transmission_week} GPS ephemerides carry the transmission week"
+        ));
+    }
     for (difference, count) in weeks {
         notes.push(format!(
             "AGNSS: {count} Galileo ephemerides carry a week {difference:+} from their time of week"
