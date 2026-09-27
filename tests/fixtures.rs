@@ -388,31 +388,77 @@ fn reviewed_huawei_agnss_is_not_refused_for_its_dates() -> Result<()> {
             "{number} {field}"
         );
     }
-    let refused: [FieldChange; 10] = [
-        (1046, "week", |v| v + 2.0),
-        (1046, "week", |v| v - 1.0),
-        (1020, "nt", |v| v + 2.0),
-        (1020, "nt", |v| v - 9.0),
-        (1020, "n4", |v| v - 1.0),
-        (1046, "toe", |v| v - 5.0 * 3600.0),
-        (1020, "tb", |v| v - 2700.0),
-        (1020, "tb", |_| 127.0 * 900.0),
-        (1019, "week", |v| v - 1.0),
-        (1042, "week", |v| v - 1.0),
+    const TOE_3_H_59_MIN_BEFORE: f64 = 524640.0;
+    const TOE_4_H_01_MIN_BEFORE: f64 = 524520.0;
+    let galileo_near_limit = edit(1046, "toe", |_| TOE_3_H_59_MIN_BEFORE)?;
+    agnss::validate_fresh(&galileo_near_limit, at, true)?;
+    agnss::validate_fresh(&galileo_near_limit, at, false)?;
+    let refusal = |bytes: &[u8], at: Instant| -> Result<String> {
+        match agnss::validate_fresh(bytes, at, false) {
+            Ok(notes) => anyhow::bail!("accepted: {notes:?}"),
+            Err(error) => Ok(error.to_string()),
+        }
+    };
+    let refused: [(FieldChange, &str); 11] = [
+        ((1046, "week", |v| v + 2.0), "AGNSS Galileo week +2"),
+        ((1046, "week", |v| v - 1.0), "AGNSS Galileo week -1"),
+        ((1020, "nt", |v| v + 2.0), "AGNSS GLONASS day +2"),
+        ((1020, "nt", |v| v - 9.0), "AGNSS GLONASS day -9"),
+        ((1020, "n4", |v| v - 1.0), "AGNSS GLONASS day -1461"),
+        (
+            (1046, "toe", |_| TOE_4_H_01_MIN_BEFORE),
+            "stale AGNSS message 1046",
+        ),
+        (
+            (1046, "toe", |v| v - 5.0 * 3600.0),
+            "stale AGNSS message 1046",
+        ),
+        ((1020, "tb", |v| v - 2700.0), "stale AGNSS message 1020"),
+        (
+            (1020, "tb", |_| 127.0 * 900.0),
+            "GLONASS t_b beyond slot 95",
+        ),
+        (
+            (1019, "week", |v| v - 1.0),
+            "stale AGNSS week in message 1019",
+        ),
+        (
+            (1042, "week", |v| v - 1.0),
+            "stale AGNSS week in message 1042",
+        ),
     ];
-    for (number, field, change) in refused {
-        assert!(
-            agnss::validate_fresh(&edit(number, field, change)?, at, false).is_err(),
-            "{number} {field}"
-        );
+    for ((number, field, change), reason) in refused {
+        let error = refusal(&edit(number, field, change)?, at)?;
+        assert!(error.contains(reason), "{number} {field}: {error}");
     }
+    let only = |number: u16, tb: f64| -> Result<Vec<u8>> {
+        let mut stream = Vec::new();
+        for payload in rtcm::payloads(&bytes)? {
+            let mut message = rtcm::Message::decode(payload)?;
+            if message.number == number {
+                message.values.insert("tb".into(), tb);
+                stream.extend(rtcm::frame(&message.encode()?)?);
+            }
+        }
+        Ok(stream)
+    };
+    let moscow_midnight = Instant::parse("2026-09-26T20:59:00Z")?;
+    let slot = 900.0;
+    let error = refusal(&only(1020, 0.0)?, moscow_midnight)?;
+    assert!(error.contains("no GPS ephemeris"), "{error}");
+    let error = refusal(&only(1020, 96.0 * slot)?, moscow_midnight)?;
+    assert!(error.contains("GLONASS t_b beyond slot 95"), "{error}");
     let mut without_gps = Vec::new();
     for payload in rtcm::payloads(&bytes)? {
         if rtcm::Message::decode(payload)?.number != 1019 {
             without_gps.extend(rtcm::frame(payload)?);
         }
     }
-    assert!(agnss::validate_fresh(&without_gps, at, false).is_err());
+    let error = refusal(&without_gps, at)?;
+    assert!(
+        error.contains("no GPS ephemeris (1019) in AGNSS"),
+        "{error}"
+    );
     Ok(())
 }
 
@@ -609,6 +655,67 @@ fn reviewed_flagged_arc_at_build_time_removes_only_nearby_records() -> Result<()
         }
     }
     assert!(near > 0 && far >= 20, "near {near}, far {far}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the author's reviewed seed and broadcast snapshot"]
+fn reviewed_flagged_arc_far_from_broadcast_removes_the_satellite() -> Result<()> {
+    use weinav_forge::{
+        build,
+        policy::{Flavor, Role},
+        time::Instant,
+    };
+    const ARC_SHIFT_M: f64 = 300.0;
+    let root = PathBuf::from(
+        std::env::var_os("WEINAV_REVIEW_FIXTURES")
+            .context("set WEINAV_REVIEW_FIXTURES to the gen3-evidence directory")?,
+    );
+    let local = BTreeMap::from([
+        (Role::Seed, vec![root.join("HiEE_V2.dat")]),
+        (
+            Role::Broadcast,
+            vec![root.join("agent_satdrops/brdc/BRDC00WRD_S_20262690000_01D_MN.rnx.gz")],
+        ),
+    ]);
+    let cache = tempfile::tempdir()?;
+    let mut inputs = build::Inputs::load(
+        cache.path(),
+        None,
+        Flavor::Huawei,
+        &[System::Bds],
+        false,
+        &local,
+    )?;
+    let at = Instant::parse("2026-09-26T05:43:07Z")?;
+    let now = at.gps() as f64;
+    let arc = inputs
+        .satellites
+        .get_mut(&System::Bds)
+        .and_then(|s| s.get_mut(&7))
+        .and_then(|s| s.arcs.iter_mut().find(|a| a.start <= now && now < a.end))
+        .context("C07 arc at the build time")?;
+    arc.flag = 1;
+    arc.coefficients[0][0] += ARC_SHIFT_M;
+    let products = build::assemble(&inputs, Flavor::Huawei, &[System::Bds], false, at, 1.0)?;
+    let epochs = record::parse_container(System::Bds, &products.files["HW_PGNSS_BDS"])?;
+    assert_eq!(epochs.len(), products.epochs.len());
+    for epoch in &epochs {
+        let shipped = epoch.blocks[0]
+            .iter()
+            .any(|bytes| record::decode(System::Bds, bytes).is_ok_and(|v| v["sv"] == 6.0));
+        assert!(!shipped, "C07 shipped at {}", epoch.time);
+    }
+    for report in &products.epochs {
+        assert!(
+            report
+                .removals
+                .iter()
+                .any(|r| r.starts_with("7: independent broadcast position differs by")),
+            "{:?}",
+            report.removals
+        );
+    }
     Ok(())
 }
 
