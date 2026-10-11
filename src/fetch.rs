@@ -5,13 +5,14 @@ use crate::{
     rinex::Broadcast,
     rtcm,
     seed::{MAX_DECODED_BYTES, Seed, decompress},
+    snapshot,
     sp3::{Antex, Sp3},
     time::Instant,
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{Datelike, Timelike, Utc};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
@@ -22,6 +23,63 @@ use url::Url;
 
 const BROADCAST_SNAPSHOT_URL: &str = "https://igs.bkg.bund.de/root_ftp/NTRIP/BRDC/brdc_last.rnx.Z";
 const CODE_BASE: &str = "https://zhw-b.s3.cloud.switch.ch/aiub/CODE";
+const ESA_DAILY: &str = "ftp://gssc.esa.int/gnss/data/daily";
+const ESA_HOURLY: &str = "ftp://gssc.esa.int/gnss/data/hourly";
+const WUHAN_DAILY: &str = "ftp://igs.gnsswhu.cn/pub/gps/data/daily";
+const SNAPSHOT_PROVIDER: &str = "esa-hourly";
+const SNAPSHOT_MIN_STATIONS: usize = 12;
+const SNAPSHOT_HOURS_BACK: [i64; 2] = [1, 2];
+const SECONDS_PER_HOUR: i64 = 3600;
+const SNAPSHOT_STATIONS: [&str; 30] = [
+    "TKBG00JPN",
+    "USUD00JPN",
+    "NTUS00SGP",
+    "IISC00IND",
+    "GDKG00IND",
+    "POHN00FSM",
+    "MAJU00MHL",
+    "XMIS00AUS",
+    "DARW00AUS",
+    "KARR00AUS",
+    "SYDN00AUS",
+    "HOB200AUS",
+    "TONG00TON",
+    "NRMG00NCL",
+    "KIRI00KIR",
+    "LAUT00FJI",
+    "WTZR00DEU",
+    "KIRU00SWE",
+    "MAS100ESP",
+    "ISTA00TUR",
+    "HRAO00ZAF",
+    "MAL200KEN",
+    "VACS00MUS",
+    "ALGO00CAN",
+    "FAIR00USA",
+    "MKEA00USA",
+    "SANT00CHL",
+    "KOUR00GUF",
+    "THU200GRL",
+    "MCM400ATA",
+];
+pub const BKG_SUBSTITUTES: [&str; 3] = ["dlr-brdm", "igs-brdc", SNAPSHOT_PROVIDER];
+
+#[derive(Debug)]
+struct ConnectionRefused;
+
+impl std::fmt::Display for ConnectionRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("connection failed")
+    }
+}
+
+impl std::error::Error for ConnectionRefused {}
+
+fn refused_connection(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ConnectionRefused>() || crate::http::refused_connection(cause))
+}
 
 fn code_prediction_url(day: chrono::DateTime<Utc>) -> String {
     format!(
@@ -46,6 +104,7 @@ struct Fetcher<'a> {
     client: Option<Client>,
     offline: bool,
     attempts: Vec<String>,
+    unreachable: BTreeSet<String>,
 }
 
 pub fn manifest_name(flavor: Flavor) -> String {
@@ -129,6 +188,12 @@ pub fn inspect(role: Role, bytes: &[u8]) -> Result<Vec<Coverage>> {
 }
 
 impl<'a> Fetcher<'a> {
+    fn metadata_path(&self, url: &str) -> PathBuf {
+        self.root
+            .join("urls")
+            .join(format!("{}.json", cache::hash(url.as_bytes())))
+    }
+
     fn get(
         &mut self,
         url: &str,
@@ -136,10 +201,7 @@ impl<'a> Fetcher<'a> {
         provider: &str,
         check: bool,
     ) -> Result<(Source, Vec<u8>)> {
-        let metadata = self
-            .root
-            .join("urls")
-            .join(format!("{}.json", cache::hash(url.as_bytes())));
+        let metadata = self.metadata_path(url);
         let cached = if metadata.exists() {
             Some(serde_json::from_slice::<Source>(&cache::read(&metadata)?)?)
         } else {
@@ -166,7 +228,13 @@ impl<'a> Fetcher<'a> {
             parsed.username().is_empty() && parsed.password().is_none(),
             "credentials in source URLs are not supported"
         );
+        let host = parsed.host_str().unwrap_or_default().to_owned();
+        ensure!(
+            !self.unreachable.contains(&host),
+            "{url}: {host} refused a connection earlier in this fetch"
+        );
         let mut failures = Vec::new();
+        let mut refused = 0;
         for attempt in 0..2 {
             let outcome = (|| -> Result<(Vec<u8>, Option<String>, Option<String>)> {
                 if parsed.scheme() == "ftp" {
@@ -220,12 +288,18 @@ impl<'a> Fetcher<'a> {
                     return Ok((source, bytes));
                 }
                 Err(error) => {
+                    if refused_connection(&error) {
+                        refused += 1;
+                    }
                     failures.push(format!("{url}: {error:#}"));
                     if attempt == 0 {
                         std::thread::sleep(Duration::from_millis(250));
                     }
                 }
             }
+        }
+        if refused == failures.len() {
+            self.unreachable.insert(host);
         }
         self.attempts.extend(failures.clone());
         bail!("{}", failures.join("; "))
@@ -255,11 +329,58 @@ impl<'a> Fetcher<'a> {
                 Err(_) => {}
             }
         }
-        sources.push(
-            self.get(BROADCAST_SNAPSHOT_URL, Role::Broadcast, "brdc", true)?
-                .0,
-        );
+        match self.get(BROADCAST_SNAPSHOT_URL, Role::Broadcast, "brdc", true) {
+            Ok((source, _)) => sources.push(source),
+            Err(error) => sources.push(
+                self.station_snapshot(at)
+                    .with_context(|| format!("brdc: {error:#}"))?,
+            ),
+        }
         Ok(sources)
+    }
+
+    fn settled(&mut self, url: &str) -> Result<Vec<u8>> {
+        let metadata = self.metadata_path(url);
+        if metadata.exists() {
+            let cached: Source = serde_json::from_slice(&cache::read(&metadata)?)?;
+            if let Ok(bytes) = cache::load_source(self.root, &cached) {
+                self.attempts.push(format!("cache: {url}"));
+                return Ok(bytes);
+            }
+        }
+        Ok(self.get(url, Role::Broadcast, SNAPSHOT_PROVIDER, false)?.1)
+    }
+
+    fn station_snapshot(&mut self, at: Instant) -> Result<Source> {
+        let mut files = Vec::new();
+        for url in station_urls(at) {
+            match self.settled(&url) {
+                Ok(bytes) => files.push((published_file(&url), bytes)),
+                Err(error) => self
+                    .attempts
+                    .push(format!("{SNAPSHOT_PROVIDER}: {error:#}")),
+            }
+        }
+        let merged = snapshot::merge(&files, SNAPSHOT_MIN_STATIONS)
+            .with_context(|| format!("{SNAPSHOT_PROVIDER} unavailable"))?;
+        let source = Source {
+            role: Role::Broadcast,
+            provider: SNAPSHOT_PROVIDER.into(),
+            url: format!("merge:{SNAPSHOT_PROVIDER}/{}", snapshot_name(at)),
+            sha256: cache::hash(&merged.bytes),
+            bytes: merged.bytes.len(),
+            fetched_at: Utc::now().to_rfc3339(),
+            etag: None,
+            last_modified: None,
+            coverage: inspect(Role::Broadcast, &merged.bytes)?,
+            version: None,
+        };
+        cache::store_source(self.root, &source, &merged.bytes)?;
+        self.attempts.push(format!(
+            "merge: {} with records of {} stations",
+            source.url, merged.stations
+        ));
+        Ok(source)
     }
 
     fn klobuchar_header(&mut self, at: Instant) -> Option<Source> {
@@ -279,6 +400,7 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
         client,
         offline: options.offline,
         attempts: Vec::new(),
+        unreachable: BTreeSet::new(),
     };
     let mut sources = Vec::new();
     for role in Plan::new(options.flavor, options.systems, options.agnss).sources {
@@ -497,23 +619,86 @@ fn daily_url(
     )
 }
 
+fn mirror_daily(day: chrono::DateTime<Utc>) -> Vec<(String, String)> {
+    let stamp = day.format("%Y%j");
+    let (year, ordinal) = (day.year(), day.ordinal());
+    [("dlr-brdm", "BRDM00DLR_S"), ("igs-brdc", "BRDC00IGS_R")]
+        .into_iter()
+        .flat_map(|(provider, product)| {
+            let name = format!("{product}_{stamp}0000_01D_MN.rnx.gz");
+            [
+                (
+                    provider.to_owned(),
+                    format!("{ESA_DAILY}/{year}/{ordinal:03}/{name}"),
+                ),
+                (
+                    provider.to_owned(),
+                    format!("{WUHAN_DAILY}/{year}/brdc/{name}"),
+                ),
+            ]
+        })
+        .collect()
+}
+
 fn daily_broadcast(at: Instant) -> [(bool, Vec<(String, String)>); 2] {
     let daily = |day| {
         [("IGS", "S"), ("MGEX", "S"), ("IGS", "R")]
             .map(|(pool, kind)| daily_url("brdc", pool, kind, day))
             .to_vec()
     };
-    [
-        (true, daily(at.0 - chrono::Duration::days(1))),
-        (false, daily(at.0)),
-    ]
+    let previous_day = at.0 - chrono::Duration::days(1);
+    let mut previous = daily(previous_day);
+    previous.extend(mirror_daily(previous_day));
+    [(true, previous), (false, daily(at.0))]
 }
 
 fn klobuchar_header(at: Instant) -> Vec<(String, String)> {
     let provider = provider(Role::Ionosphere);
-    [at.0, at.0 - chrono::Duration::days(1)]
+    let previous_day = at.0 - chrono::Duration::days(1);
+    let mut candidates = [at.0, previous_day]
         .map(|day| daily_url(provider, "EUREF", "R", day))
-        .to_vec()
+        .to_vec();
+    candidates.extend(mirror_daily(previous_day));
+    candidates
+}
+
+fn hour_start(time: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    let timestamp = time.timestamp();
+    chrono::DateTime::from_timestamp(timestamp - timestamp.rem_euclid(SECONDS_PER_HOUR), 0)
+        .unwrap_or(time)
+}
+
+fn station_urls(at: Instant) -> Vec<String> {
+    let current = hour_start(at.0);
+    SNAPSHOT_HOURS_BACK
+        .iter()
+        .flat_map(|back| {
+            let start = current - chrono::Duration::hours(*back);
+            SNAPSHOT_STATIONS.iter().map(move |station| {
+                format!(
+                    "{ESA_HOURLY}/{}/{:03}/{:02}/{station}_R_{}{:02}00_01H_MN.rnx.gz",
+                    start.year(),
+                    start.ordinal(),
+                    start.hour(),
+                    start.format("%Y%j"),
+                    start.hour()
+                )
+            })
+        })
+        .collect()
+}
+
+fn snapshot_name(at: Instant) -> String {
+    let newest = hour_start(at.0) - chrono::Duration::hours(SNAPSHOT_HOURS_BACK[0]);
+    format!(
+        "brdc_stations_{}_{:02}.rnx",
+        newest.format("%Y%j"),
+        newest.hour()
+    )
+}
+
+fn published_file(url: &str) -> String {
+    url.rsplit('/').next().unwrap_or(url).to_owned()
 }
 
 fn candidates(role: Role, at: Instant) -> Vec<(String, String)> {
@@ -550,7 +735,7 @@ fn ftp(url: &Url) -> Result<Vec<u8>> {
             break;
         }
     }
-    let stream = connection.context("FTP connection failed")?;
+    let stream = connection.ok_or(ConnectionRefused)?;
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let peer = stream.peer_addr()?;
@@ -702,6 +887,52 @@ mod tests {
                 .1
                 .contains("/EUREF/BRDC/2025/365/BRDC00WRD_R_2025365")
         );
+        let mirrors = [
+            (
+                "dlr-brdm",
+                "ftp://gssc.esa.int/gnss/data/daily/2025/365/BRDM00DLR_S_20253650000_01D_MN.rnx.gz",
+            ),
+            (
+                "dlr-brdm",
+                "ftp://igs.gnsswhu.cn/pub/gps/data/daily/2025/brdc/BRDM00DLR_S_20253650000_01D_MN.rnx.gz",
+            ),
+            (
+                "igs-brdc",
+                "ftp://gssc.esa.int/gnss/data/daily/2025/365/BRDC00IGS_R_20253650000_01D_MN.rnx.gz",
+            ),
+            (
+                "igs-brdc",
+                "ftp://igs.gnsswhu.cn/pub/gps/data/daily/2025/brdc/BRDC00IGS_R_20253650000_01D_MN.rnx.gz",
+            ),
+        ]
+        .map(|(provider, url)| (provider.to_owned(), url.to_owned()));
+        assert_eq!(files[0].1[3..], mirrors);
+        assert_eq!(files[1].1.len(), 3);
+        assert_eq!(header[2..], mirrors);
+        Ok(())
+    }
+
+    #[test]
+    fn station_snapshot_uses_the_two_previous_hours_across_a_day_boundary() -> Result<()> {
+        let at = Instant::parse("2026-01-01T00:08:00Z")?;
+        let urls = station_urls(at);
+        assert_eq!(
+            urls.len(),
+            SNAPSHOT_HOURS_BACK.len() * SNAPSHOT_STATIONS.len()
+        );
+        assert_eq!(
+            urls[0],
+            "ftp://gssc.esa.int/gnss/data/hourly/2025/365/23/TKBG00JPN_R_20253652300_01H_MN.rnx.gz"
+        );
+        assert_eq!(
+            urls[SNAPSHOT_STATIONS.len()],
+            "ftp://gssc.esa.int/gnss/data/hourly/2025/365/22/TKBG00JPN_R_20253652200_01H_MN.rnx.gz"
+        );
+        assert_eq!(snapshot_name(at), "brdc_stations_2025365_23.rnx");
+        assert_eq!(
+            published_file(&urls[0]),
+            "TKBG00JPN_R_20253652300_01H_MN.rnx.gz"
+        );
         Ok(())
     }
 
@@ -757,6 +988,7 @@ mod tests {
         let previous_day = daily_broadcast(at)[0].1[0].1.clone();
         let header_urls: Vec<_> = klobuchar_header(at)
             .into_iter()
+            .take(2)
             .map(|(_, url)| url)
             .collect();
         let [build_day_header, previous_day_header] = <[String; 2]>::try_from(header_urls)
@@ -785,6 +1017,7 @@ mod tests {
             client: None,
             offline: true,
             attempts: vec![],
+            unreachable: BTreeSet::new(),
         };
         let mut sources = fetcher.broadcast(at)?;
         sources.extend(fetcher.klobuchar_header(at));
@@ -803,6 +1036,132 @@ mod tests {
                 .attempts
                 .iter()
                 .any(|a| a.contains(&build_day_header) && a.contains("Klobuchar"))
+        );
+        Ok(())
+    }
+
+    fn offline_fetcher(root: &Path) -> Fetcher<'_> {
+        Fetcher {
+            root,
+            client: None,
+            offline: true,
+            attempts: vec![],
+            unreachable: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn without_bkg_a_mirror_day_and_merged_station_files_are_used() -> Result<()> {
+        let at = Instant::parse("2026-01-01T00:08:00Z")?;
+        let file = navigation("");
+        let [(_, previous), _] = daily_broadcast(at);
+        let mirror = previous[3].1.clone();
+        let stations = station_urls(at);
+        let merged_url = format!("merge:{SNAPSHOT_PROVIDER}/{}", snapshot_name(at));
+        let root = tempfile::tempdir()?;
+        offline_copy(root.path(), &mirror, Role::Broadcast, &file)?;
+        for url in &stations[..SNAPSHOT_MIN_STATIONS] {
+            offline_copy(root.path(), url, Role::Broadcast, &file)?;
+        }
+        let mut fetcher = offline_fetcher(root.path());
+        let sources = fetcher.broadcast(at)?;
+        let fetched: Vec<_> = sources
+            .iter()
+            .map(|s| (s.provider.as_str(), s.url.as_str()))
+            .collect();
+        assert_eq!(
+            fetched,
+            [
+                ("dlr-brdm", mirror.as_str()),
+                (SNAPSHOT_PROVIDER, merged_url.as_str())
+            ]
+        );
+        assert_eq!(
+            cache::load_source(root.path(), &sources[1])?.len(),
+            sources[1].bytes
+        );
+        assert!(
+            fetcher
+                .attempts
+                .iter()
+                .any(|a| a.ends_with(&format!("with records of {SNAPSHOT_MIN_STATIONS} stations")))
+        );
+        let thin = tempfile::tempdir()?;
+        offline_copy(thin.path(), &mirror, Role::Broadcast, &file)?;
+        for url in &stations[..SNAPSHOT_MIN_STATIONS - 1] {
+            offline_copy(thin.path(), url, Role::Broadcast, &file)?;
+        }
+        let error = offline_fetcher(thin.path())
+            .broadcast(at)
+            .err()
+            .context("a thin station snapshot was accepted")?;
+        assert!(format!("{error:#}").contains(&format!(
+            "{} station navigation files have usable records; {SNAPSHOT_MIN_STATIONS} are needed",
+            SNAPSHOT_MIN_STATIONS - 1
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn a_host_that_refuses_connections_is_not_tried_again() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let served = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<()> {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut reader = BufReader::new(stream.try_clone()?);
+                let mut line = String::new();
+                while line != "\r\n" {
+                    line.clear();
+                    reader.read_line(&mut line)?;
+                }
+                stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )?;
+            }
+            Ok(())
+        });
+        let closed = TcpListener::bind("127.0.0.2:0")?.local_addr()?;
+        let mut fetcher = Fetcher {
+            root: root.path(),
+            client: Some(Client::new()?),
+            offline: false,
+            attempts: vec![],
+            unreachable: BTreeSet::new(),
+        };
+        assert!(
+            fetcher
+                .get(
+                    &format!("http://{served}/missing"),
+                    Role::Seed,
+                    "test",
+                    false
+                )
+                .is_err()
+        );
+        server.join().expect("HTTP test thread panicked")?;
+        assert!(fetcher.unreachable.is_empty());
+        assert!(
+            fetcher
+                .get(&format!("http://{closed}/first"), Role::Seed, "test", false)
+                .is_err()
+        );
+        assert!(fetcher.unreachable.contains("127.0.0.2"));
+        let error = fetcher
+            .get(
+                &format!("http://{closed}/second"),
+                Role::Seed,
+                "test",
+                false,
+            )
+            .err()
+            .context("an unreachable host was tried again")?;
+        assert!(
+            error
+                .to_string()
+                .contains("127.0.0.2 refused a connection earlier in this fetch")
         );
         Ok(())
     }
@@ -850,6 +1209,7 @@ mod tests {
             client: Some(Client::new()?),
             offline: false,
             attempts: vec![],
+            unreachable: BTreeSet::new(),
         };
         let (mut source, bytes) = fetcher.get(&url, Role::Seed, "test", false)?;
         assert_eq!(bytes, b"test source bytes");

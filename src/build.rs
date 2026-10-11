@@ -276,6 +276,21 @@ impl Inputs {
         )))
     }
 
+    pub fn substitution_notes(&self) -> Vec<String> {
+        self.sources
+            .iter()
+            .filter(|source| crate::fetch::BKG_SUBSTITUTES.contains(&source.provider.as_str()))
+            .map(|source| {
+                format!(
+                    "{}: BKG is not available; {} gives {}",
+                    format!("{:?}", source.role).to_lowercase(),
+                    source.provider,
+                    crate::report::published_name(source)
+                )
+            })
+            .collect()
+    }
+
     pub fn health_source(&self) -> Option<&Source> {
         self.sources
             .iter()
@@ -589,6 +604,7 @@ pub fn assemble(
     product
         .notes
         .extend(stale_snapshot_notes(&inputs.health, at));
+    product.notes.extend(inputs.substitution_notes());
     if let Some(seed) = &inputs.seed {
         ensure!(
             seed.brackets(at.gps() as f64, (at.gps() + 43200) as f64),

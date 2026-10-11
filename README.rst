@@ -118,6 +118,11 @@ The NixOS module below manages a separate published directory.
 The broadcast health file is a copy of the broadcast data that the tool used
 to find unhealthy satellites.
 
+When BKG is not available, the tool gets the broadcast file of the day before
+from other servers. It then makes the broadcast health file from the hourly
+broadcast files of 30 stations. The report gives a note for each source that
+replaces a BKG file.
+
 Exit status is 0 for success, 2 for a command-line parsing error, 3 when a
 source is unavailable, 4 when output is refused, and 1 for another error.
 

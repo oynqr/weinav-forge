@@ -23,6 +23,12 @@ const MAX_REDIRECTS: usize = 5;
 #[cfg(test)]
 mod tests;
 
+pub fn refused_connection(cause: &(dyn std::error::Error + 'static)) -> bool {
+    cause
+        .downcast_ref::<wreq::Error>()
+        .is_some_and(wreq::Error::is_connect)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Endpoint {
     Config,

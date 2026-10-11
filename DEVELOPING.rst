@@ -282,6 +282,31 @@ is required. The daily file of the build day is used when BKG has published
 it: early in the UTC day it does not exist yet, and ``brdc_last.rnx.Z`` then
 gives the last 24 hours.
 
+BKG was not available from 7 October 2026. For the day before, the fetcher
+then tries the DLR ``BRDM00DLR_S`` file and the IGS ``BRDC00IGS_R`` file, each
+from the ESA server and then from the Wuhan server. When ``brdc_last.rnx.Z``
+is not available, the fetcher makes the health snapshot from the ESA hourly
+broadcast files of 30 stations for the two hours before the hour of the build.
+The stations are in Asia and the Pacific for BeiDou and on all continents for
+the other constellations. The merge keeps RINEX 3 files only. It writes each
+record in RINEX 3.04 form, with 31 values, or 15 for GLONASS, with a blank
+value as 0 and with ``E`` exponents. It removes records that are the same and
+sorts the records. Thus the same station files always give the same snapshot.
+A record with lines that are missing is removed. The header has a comment for
+each station file with its name and the start of its SHA-256. At least 12
+stations must have records, or the snapshot is not available. The source URL
+is ``merge:esa-hourly/brdc_stations_YYYYDDD_HH.rnx``, with the newer hour; its
+last part is the name of the published health file. The report gives a note
+for each ``broadcast`` or ``ionosphere`` source that replaces a BKG file. In
+the builds of 11 October 2026, the merged snapshot had records of 60 station
+files, and the O1 screen of the external gate compared 35 BeiDou satellites.
+
+The ``ionosphere`` role uses the same DLR and IGS files of the day before
+after the two EUREF files. Their header has a ``GAL`` line with three values,
+which the parser ignores. When a connection to a host fails at each attempt
+of one URL, the fetcher does not try that host again in the same fetch. A
+file that is missing does not stop the use of its host.
+
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
 Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
 role, for the build day or else for the day before. A file without the

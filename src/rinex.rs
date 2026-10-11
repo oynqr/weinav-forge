@@ -165,6 +165,11 @@ impl Broadcast {
         for line in &lines[..end] {
             if line.get(60..).unwrap_or("").trim() == "IONOSPHERIC CORR" {
                 let key = line.get(..4).context("short ionosphere header")?.trim();
+                let target = match key {
+                    "GPSA" => &mut header_alpha,
+                    "GPSB" => &mut header_beta,
+                    _ => continue,
+                };
                 let mut values = [0.0; 4];
                 for (i, value) in values.iter_mut().enumerate() {
                     *value = number(
@@ -172,11 +177,7 @@ impl Broadcast {
                             .context("short ionosphere coefficient")?,
                     )?;
                 }
-                match key {
-                    "GPSA" => header_alpha = Some(values),
-                    "GPSB" => header_beta = Some(values),
-                    _ => {}
-                }
+                *target = Some(values);
             }
         }
         let mut index = end + 1;
@@ -678,6 +679,20 @@ mod tests {
         assert_eq!(newer.alpha, [1e-8, 0.0, 0.0, 0.0]);
         assert_eq!(newer.beta, [9e4, 0.0, 0.0, 0.0]);
         assert!(newer.time > rinex_4.time);
+        Ok(())
+    }
+
+    #[test]
+    fn klobuchar_header_ignores_galileo_coefficients() -> Result<()> {
+        let header = format!(
+            "GAL  {:12.4E}{:12.4E}{:12.4E}{:19}IONOSPHERIC CORR\nGPSA {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\nGPSB {:12.4E}{:12.4E}{:12.4E}{:12.4E}{:7}IONOSPHERIC CORR\n",
+            66.25, -0.164, -2.4e-4, "", 1e-8, 0.0, 0.0, 0.0, "", 9e4, 0.0, 0.0, 0.0, ""
+        );
+        let mut broadcast = Broadcast::default();
+        broadcast.add(&navigation("3.04", &header, "", 0))?;
+        let klobuchar = broadcast.klobuchar.context("header ionosphere missing")?;
+        assert_eq!(klobuchar.alpha, [1e-8, 0.0, 0.0, 0.0]);
+        assert_eq!(klobuchar.beta, [9e4, 0.0, 0.0, 0.0]);
         Ok(())
     }
 

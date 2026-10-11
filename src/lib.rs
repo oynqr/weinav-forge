@@ -15,5 +15,6 @@ pub mod report;
 pub mod rinex;
 pub mod rtcm;
 pub mod seed;
+pub mod snapshot;
 pub mod sp3;
 pub mod time;
