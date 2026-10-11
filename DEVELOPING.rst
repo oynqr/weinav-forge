@@ -307,6 +307,10 @@ which the parser ignores. When a connection to a host fails at each attempt
 of one URL, the fetcher does not try that host again in the same fetch. A
 file that is missing does not stop the use of its host.
 
+The GSC almanac page lists files by a date in their name. The fetcher gets
+the three newest files and uses the one with the newest ``issueDate``. On
+11 October 2026, the file ``2026-10-09.xml`` had the almanac of 1 October.
+
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
 Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
 role, for the build day or else for the day before. A file without the

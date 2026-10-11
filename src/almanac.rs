@@ -10,6 +10,17 @@ use std::{collections::BTreeMap, f64::consts::PI};
 
 pub type Yuma = BTreeMap<u8, BTreeMap<String, f64>>;
 
+pub fn galileo_issue(galileo: &[u8]) -> Result<Instant> {
+    let bytes = decompress(galileo)?;
+    let xml = roxmltree::Document::parse(std::str::from_utf8(&bytes)?)?;
+    let issue = xml
+        .descendants()
+        .find(|n| n.has_tag_name("issueDate"))
+        .and_then(|n| n.text())
+        .context("Galileo issue date missing")?;
+    Instant::parse(issue)
+}
+
 pub fn yuma(input: &[u8]) -> Result<Yuma> {
     let bytes = decompress(input)?;
     let text = std::str::from_utf8(&bytes)?;
@@ -171,14 +182,9 @@ pub fn build(
     }
     out[0x550] = week.context("GPS almanac week missing")? as u8;
     out[0x551] = yuma.len() as u8;
+    let issue = galileo_issue(galileo)?;
     let bytes = decompress(galileo)?;
     let xml = roxmltree::Document::parse(std::str::from_utf8(&bytes)?)?;
-    let issue = xml
-        .descendants()
-        .find(|n| n.has_tag_name("issueDate"))
-        .and_then(|n| n.text())
-        .context("Galileo issue date missing")?;
-    let issue = Instant::parse(issue)?;
     ensure!(
         (issue.gps() - at.gps()).abs() <= 7 * 86400,
         "Galileo almanac is stale"
@@ -311,6 +317,17 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn galileo_issue_reads_the_issue_date() -> Result<()> {
+        let xml = b"<signalData><header><GAL-header><issueDate>2026-10-06T09:59:59.0Z</issueDate></GAL-header></header></signalData>";
+        assert_eq!(
+            galileo_issue(xml)?.0,
+            Instant::parse("2026-10-06T09:59:59Z")?.0
+        );
+        assert!(galileo_issue(b"<signalData/>").is_err());
         Ok(())
     }
 }

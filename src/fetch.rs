@@ -26,6 +26,7 @@ const CODE_BASE: &str = "https://zhw-b.s3.cloud.switch.ch/aiub/CODE";
 const ESA_DAILY: &str = "ftp://gssc.esa.int/gnss/data/daily";
 const ESA_HOURLY: &str = "ftp://gssc.esa.int/gnss/data/hourly";
 const WUHAN_DAILY: &str = "ftp://igs.gnsswhu.cn/pub/gps/data/daily";
+const GALILEO_ALMANAC_CANDIDATES: usize = 3;
 const SNAPSHOT_PROVIDER: &str = "esa-hourly";
 const SNAPSHOT_MIN_STATIONS: usize = 12;
 const SNAPSHOT_HOURS_BACK: [i64; 2] = [1, 2];
@@ -320,6 +321,33 @@ impl<'a> Fetcher<'a> {
         bail!("{role:?} unavailable: {}", errors.join("; "))
     }
 
+    fn newest_galileo_almanac(&mut self, urls: &[String]) -> Result<Source> {
+        let role = Role::GalileoAlmanac;
+        let provider = provider(role);
+        let mut newest: Option<(Instant, Source)> = None;
+        let mut errors = Vec::new();
+        for url in urls {
+            match self
+                .get(url, role, provider, true)
+                .and_then(|(source, bytes)| Ok((crate::almanac::galileo_issue(&bytes)?, source)))
+            {
+                Ok((issue, source)) => {
+                    if newest.as_ref().is_none_or(|(best, _)| issue.0 > best.0) {
+                        newest = Some((issue, source));
+                    }
+                }
+                Err(e) => {
+                    let detail = format!("{provider}: {e:#}");
+                    self.attempts.push(detail.clone());
+                    errors.push(detail);
+                }
+            }
+        }
+        newest
+            .map(|(_, source)| source)
+            .with_context(|| format!("{role:?} unavailable: {}", errors.join("; ")))
+    }
+
     fn broadcast(&mut self, at: Instant) -> Result<Vec<Source>> {
         let mut sources = Vec::new();
         for (required, candidates) in daily_broadcast(at) {
@@ -520,16 +548,12 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         }
                     }
                     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
-                    sources.push(
-                        fetcher.chain(
-                            role,
-                            &candidates
-                                .into_iter()
-                                .take(3)
-                                .map(|(_, url)| ("gsc".into(), url))
-                                .collect::<Vec<_>>(),
-                        )?,
-                    );
+                    let urls: Vec<String> = candidates
+                        .into_iter()
+                        .take(GALILEO_ALMANAC_CANDIDATES)
+                        .map(|(_, url)| url)
+                        .collect();
+                    sources.push(fetcher.newest_galileo_almanac(&urls)?);
                 }
                 Role::Broadcast => sources.extend(fetcher.broadcast(options.at)?),
                 Role::Ionosphere => sources.extend(fetcher.klobuchar_header(options.at)),
@@ -1099,6 +1123,45 @@ mod tests {
             "{} station navigation files have usable records; {SNAPSHOT_MIN_STATIONS} are needed",
             SNAPSHOT_MIN_STATIONS - 1
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn the_newest_galileo_almanac_issue_wins_over_the_newest_file_name() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let almanac = |issue: &str| {
+            format!("<signalData><header><issueDate>{issue}</issueDate></header></signalData>")
+                .into_bytes()
+        };
+        let urls = [
+            "https://gsc.example/2026-10-09.xml",
+            "https://gsc.example/2026-10-06.xml",
+            "https://gsc.example/2026-10-02.xml",
+            "https://gsc.example/broken.xml",
+        ]
+        .map(str::to_owned);
+        for (url, issue) in urls.iter().zip([
+            "2026-10-01T09:59:59.0Z",
+            "2026-10-06T09:59:59.0Z",
+            "2026-10-02T09:59:59.0Z",
+        ]) {
+            offline_copy(root.path(), url, Role::GalileoAlmanac, &almanac(issue))?;
+        }
+        offline_copy(
+            root.path(),
+            &urls[3],
+            Role::GalileoAlmanac,
+            b"<signalData/>",
+        )?;
+        let mut fetcher = offline_fetcher(root.path());
+        assert_eq!(fetcher.newest_galileo_almanac(&urls)?.url, urls[1]);
+        assert!(
+            fetcher
+                .attempts
+                .iter()
+                .any(|a| a.contains("Galileo issue date missing"))
+        );
+        assert!(fetcher.newest_galileo_almanac(&urls[3..]).is_err());
         Ok(())
     }
 
