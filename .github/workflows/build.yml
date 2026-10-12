@@ -61,7 +61,7 @@ jobs:
       - name: Check that the lock files did not change
         run: sha256sum --check "$RUNNER_TEMP/lock-files.sha256"
       - name: Upload the binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: weinav-forge-${{ matrix.system }}
           path: binary/weinav-forge
