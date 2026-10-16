@@ -20,6 +20,20 @@ pub struct Navigation {
     pub epoch: f64,
     pub system_epoch: f64,
     pub values: Values,
+    unhealthy_copy: bool,
+}
+
+fn health_field(system: System) -> &'static str {
+    match system {
+        System::Glonass => "health",
+        System::Bds => "sath1",
+        _ => "sv_health",
+    }
+}
+
+pub fn health_index(code: char) -> Option<usize> {
+    let field = health_field(System::from_code(code)?);
+    schema::names(code)?.iter().position(|name| *name == field)
 }
 
 #[derive(Clone, Debug)]
@@ -269,15 +283,23 @@ impl Broadcast {
             );
             let names = schema::names(code).context("unsupported RINEX system")?;
             let values = Values::new(names, &values);
-            let nav = Navigation {
+            let mut nav = Navigation {
                 system,
                 svid,
                 epoch,
                 system_epoch,
                 values,
+                unhealthy_copy: false,
             };
             first_epoch = first_epoch.min(epoch);
             let records = self.records.entry((system, svid)).or_default();
+            nav.unhealthy_copy = records
+                .iter()
+                .any(|old| old.epoch == epoch && !old.healthy());
+            let unhealthy = !nav.healthy();
+            for old in records.iter_mut().filter(|old| old.epoch == epoch) {
+                old.unhealthy_copy |= unhealthy;
+            }
             if let Some(old) = records.iter_mut().find(|old| {
                 old.epoch == epoch
                     && old.values.get("data_sources") == nav.values.get("data_sources")
@@ -374,13 +396,8 @@ impl Navigation {
     }
 
     pub fn healthy(&self) -> bool {
-        self.values
-            .get(match self.system {
-                System::Glonass => "health",
-                System::Bds => "sath1",
-                _ => "sv_health",
-            })
-            .is_some_and(|v| {
+        !self.unhealthy_copy
+            && self.values.get(health_field(self.system)).is_some_and(|v| {
                 if self.system == System::Qzs {
                     (*v as u32) & 0x3e == 0
                 } else {
@@ -679,6 +696,62 @@ mod tests {
         assert_eq!(newer.alpha, [1e-8, 0.0, 0.0, 0.0]);
         assert_eq!(newer.beta, [9e4, 0.0, 0.0, 0.0]);
         assert!(newer.time > rinex_4.time);
+        Ok(())
+    }
+
+    fn gps_record(hour: u32, health: Option<f64>) -> String {
+        let mut text = format!(
+            "G02 2026 09 26 {hour:02} 00 00{:19.12E}{:19.12E}{:19.12E}\n",
+            0.0, 0.0, 0.0
+        );
+        let health_slot = health_index('G').expect("GPS health field");
+        for line in 0..7 {
+            text.push_str("    ");
+            for index in 0..4 {
+                let field = 3 + line * 4 + index;
+                text.push_str(&match (field == health_slot, health) {
+                    (true, Some(value)) => format!("{value:19.12E}"),
+                    (true, None) => format!("{:19}", ""),
+                    (false, _) => format!("{:19.12E}", 1.0),
+                });
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn copies_at_hour(broadcast: &Broadcast, hour: u32) -> Vec<bool> {
+        broadcast.records[&(System::Gps, 2)]
+            .iter()
+            .filter(|n| n.system_epoch.rem_euclid(86400.0) == f64::from(hour * 3600))
+            .map(Navigation::healthy)
+            .collect()
+    }
+
+    #[test]
+    fn any_unhealthy_or_unset_copy_of_an_epoch_makes_it_unhealthy() -> Result<()> {
+        let healthy = gps_record(4, Some(0.0));
+        let later = gps_record(5, Some(0.0));
+        for other in [gps_record(4, Some(1.0)), gps_record(4, None)] {
+            for body in [
+                format!("{healthy}{other}{later}"),
+                format!("{other}{healthy}{later}"),
+            ] {
+                let mut broadcast = Broadcast::default();
+                broadcast.add(&navigation("3.05", "", &body, 6))?;
+                assert_eq!(copies_at_hour(&broadcast, 4), [false]);
+                assert_eq!(copies_at_hour(&broadcast, 5), [true]);
+            }
+            for (first, second) in [(&healthy, &other), (&other, &healthy)] {
+                let mut broadcast = Broadcast::default();
+                broadcast.add(&navigation("3.05", "", first, 6))?;
+                broadcast.add(&navigation("3.05", "", second, 7))?;
+                assert_eq!(copies_at_hour(&broadcast, 4), [false]);
+            }
+        }
+        let mut broadcast = Broadcast::default();
+        broadcast.add(&navigation("3.05", "", &format!("{healthy}{healthy}"), 6))?;
+        assert_eq!(copies_at_hour(&broadcast, 4), [true]);
         Ok(())
     }
 

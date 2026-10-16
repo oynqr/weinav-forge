@@ -277,10 +277,13 @@ screening and AGNSS use all broadcast files. In the health screen and in the
 orbit comparison at the build time, each Galileo navigation message, I/NAV or
 F/NAV, gives a record, as in the external gate. The two messages of one data
 set give the same orbit. Values that differ between them, such as clock and
-group delay, come from F/NAV records only. The daily file of the day before
-is required. The daily file of the build day is used when BKG has published
-it: early in the UTC day it does not exist yet, and ``brdc_last.rnx.Z`` then
-gives the last 24 hours.
+group delay, come from F/NAV records only. A merged file can have more than
+one copy of a satellite's record at one epoch. When one copy is unhealthy or
+has no health value, all records of that satellite at that epoch are
+unhealthy, as in the external gate. This applies to all broadcast files.
+The daily file of the day before is required. The daily file of the build day
+is used when BKG has published it: early in the UTC day it does not exist
+yet, and ``brdc_last.rnx.Z`` then gives the last 24 hours.
 
 BKG was not available from 7 October 2026. For the day before, the fetcher
 then tries the DLR ``BRDM00DLR_S`` file and the IGS ``BRDC00IGS_R`` file, each
@@ -292,14 +295,16 @@ the other constellations. The merge keeps RINEX 3 files only. It writes each
 record in RINEX 3.04 form, with 31 values, or 15 for GLONASS, with a blank
 value as 0 and with ``E`` exponents. It removes records that are the same and
 sorts the records. Thus the same station files always give the same snapshot.
-A record with lines that are missing is removed. The header has a comment for
-each station file with its name and the start of its SHA-256. At least 12
-stations must have records, or the snapshot is not available. The source URL
-is ``merge:esa-hourly/brdc_stations_YYYYDDD_HH.rnx``, with the newer hour; its
-last part is the name of the published health file. The report gives a note
-for each ``broadcast`` or ``ionosphere`` source that replaces a BKG file. In
-the builds of 11 October 2026, the merged snapshot had records of 60 station
-files, and the O1 screen of the external gate compared 35 BeiDou satellites.
+A record with lines that are missing is removed. A record with a blank health
+value is also removed, because 0 is the value for healthy. The header has a
+comment for each station file with its name and the start of its SHA-256. At
+least 12 stations must have records, or the snapshot is not available. The
+source URL is ``merge:esa-hourly/brdc_stations_YYYYDDD_HH.rnx``, with the newer
+hour; its last part is the name of the published health file. The report
+gives a note for each ``broadcast`` or ``ionosphere`` source that replaces a
+BKG file. In the builds of 11 October 2026, the merged snapshot had records
+of 52 to 60 station files, and the O1 screen of the external gate compared 35
+BeiDou satellites.
 
 The ``ionosphere`` role uses the same DLR and IGS files of the day before
 after the two EUREF files. Their header has a ``GAL`` line with three values,

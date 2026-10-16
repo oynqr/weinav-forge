@@ -1,6 +1,6 @@
 use crate::{
     cache,
-    rinex::{calendar, number},
+    rinex::{calendar, health_index, number},
     seed::decompress,
 };
 use anyhow::{Context, Result, ensure};
@@ -47,16 +47,16 @@ fn rinex_number(value: f64) -> Result<String> {
     ))
 }
 
-fn slot(line: &str, start: usize, index: usize) -> Result<f64> {
+fn slot(line: &str, start: usize, index: usize) -> Result<Option<f64>> {
     let begin = start + index * FIELD_WIDTH;
     let text = line
         .get(begin..(begin + FIELD_WIDTH).min(line.len()))
         .unwrap_or("")
         .trim();
     if text.is_empty() {
-        Ok(0.0)
+        Ok(None)
     } else {
-        number(text)
+        number(text).map(Some)
     }
 }
 
@@ -86,24 +86,22 @@ fn canonical(block: &[&str]) -> Result<Option<(String, String)>> {
         date.second()
     );
     let key = format!("{system}{svid:02} {epoch}");
-    let clock_present = (0..CLOCK_FIELDS).all(|index| {
-        let begin = RECORD_PREFIX_WIDTH + index * FIELD_WIDTH;
-        first
-            .get(begin..(begin + FIELD_WIDTH).min(first.len()))
-            .is_some_and(|text| !text.trim().is_empty())
-    });
-    ensure!(clock_present, "clock field missing");
+    let health = health_index(system).context("health field unknown")?;
     let mut text = key.clone();
     for index in 0..CLOCK_FIELDS {
-        text.push_str(&rinex_number(slot(first, RECORD_PREFIX_WIDTH, index)?)?);
+        let value = slot(first, RECORD_PREFIX_WIDTH, index)?.context("clock field missing")?;
+        text.push_str(&rinex_number(value)?);
     }
     let mut remaining = fields - CLOCK_FIELDS;
-    for line in &block[1..=lines] {
+    for (line_index, line) in block[1..=lines].iter().enumerate() {
         ensure!(line.starts_with("    "), "invalid continuation line");
         text.push('\n');
         text.push_str(&" ".repeat(ORBIT_PREFIX_WIDTH));
         for index in 0..remaining.min(ORBIT_FIELDS_PER_LINE) {
-            text.push_str(&rinex_number(slot(line, ORBIT_PREFIX_WIDTH, index)?)?);
+            let field = CLOCK_FIELDS + line_index * ORBIT_FIELDS_PER_LINE + index;
+            let value = slot(line, ORBIT_PREFIX_WIDTH, index)?;
+            ensure!(value.is_some() || field != health, "health field missing");
+            text.push_str(&rinex_number(value.unwrap_or_default())?);
         }
         remaining = remaining.saturating_sub(ORBIT_FIELDS_PER_LINE);
     }
@@ -253,6 +251,45 @@ mod tests {
         assert_eq!(rinex_number(-1.5e-9)?, "-1.500000000000E-09");
         assert_eq!(rinex_number(2.5e10)?.len(), FIELD_WIDTH);
         assert!(rinex_number(1e120).is_err());
+        Ok(())
+    }
+
+    fn blank_health(record: &str) -> Result<String> {
+        let system = record.chars().next().context("empty record")?;
+        let health = health_index(system).context("health field")? - CLOCK_FIELDS;
+        let mut lines: Vec<String> = record.lines().map(str::to_owned).collect();
+        let line = &mut lines[1 + health / ORBIT_FIELDS_PER_LINE];
+        let begin = ORBIT_PREFIX_WIDTH + health % ORBIT_FIELDS_PER_LINE * FIELD_WIDTH;
+        line.replace_range(begin..begin + FIELD_WIDTH, &" ".repeat(FIELD_WIDTH));
+        Ok(lines.join("\n") + "\n")
+    }
+
+    #[test]
+    fn a_record_with_a_blank_health_field_is_dropped() -> Result<()> {
+        let mut blank = blank_health(&record("G05 2026 01 01 00 00 00", 7, 4, 'E'))?;
+        blank.push_str(&blank_health(&record(
+            "R07 2026 01 01 00 15 00",
+            4,
+            4,
+            'E',
+        ))?);
+        let complete = record("G06 2026 01 01 00 00 00", 7, 4, 'E');
+        let files = vec![
+            (
+                "AAAA00XXX_R_20260010000_01H_MN.rnx".to_owned(),
+                station_file("3.05", &blank),
+            ),
+            (
+                "BBBB00XXX_R_20260010000_01H_MN.rnx".to_owned(),
+                station_file("3.05", &complete),
+            ),
+        ];
+        let merged = merge(&files, 1)?;
+        assert_eq!(merged.stations, 1);
+        let mut broadcast = Broadcast::default();
+        broadcast.add(&merged.bytes)?;
+        let keys: Vec<_> = broadcast.records.keys().copied().collect();
+        assert_eq!(keys, [(System::Gps, 6)]);
         Ok(())
     }
 
