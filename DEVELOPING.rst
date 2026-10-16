@@ -268,6 +268,10 @@ is removed there, also when its arc has the flag set. Each epoch of the report
 gives the distance of each kept satellite in ``screen_distances_m``. The
 report notes a broadcast health snapshot whose newest GPS or GLONASS record is
 more than 45 minutes older than the build, because such a file can be stale.
+When the newest record of a requested constellation in the health snapshot
+is more than 2 hours older than the build, the processor exits with the
+source-unavailable status. The health screen of the external gate reaches
+only 2 hours, so the gate would refuse such a build.
 
 The last broadcast source file is the broadcast health snapshot. Health
 screening uses the newest fresh record in this file only, so the external

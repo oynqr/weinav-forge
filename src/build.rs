@@ -397,18 +397,37 @@ pub struct EpochReport {
 
 const SNAPSHOT_LAG_NOTE_S: f64 = 2700.0;
 
+const SNAPSHOT_REACH_S: f64 = 7200.0;
+
+fn newest_epoch(snapshot: &Broadcast, system: System) -> Option<f64> {
+    snapshot
+        .records
+        .iter()
+        .filter(|((s, _), _)| *s == system)
+        .flat_map(|(_, records)| records)
+        .map(|record| record.epoch)
+        .max_by(f64::total_cmp)
+}
+
+pub fn ensure_snapshot_reach(snapshot: &Broadcast, at: Instant, systems: &[System]) -> Result<()> {
+    let now = at.gps() as f64;
+    for &system in systems {
+        ensure!(
+            newest_epoch(snapshot, system).is_some_and(|newest| now - newest <= SNAPSHOT_REACH_S),
+            "broadcast snapshot: no {} record in the {:.0} min before the build",
+            system.name(),
+            SNAPSHOT_REACH_S / 60.0
+        );
+    }
+    Ok(())
+}
+
 pub fn stale_snapshot_notes(snapshot: &Broadcast, at: Instant) -> Vec<String> {
     let now = at.gps() as f64;
     [System::Gps, System::Glonass]
         .into_iter()
         .filter_map(|system| {
-            let newest = snapshot
-                .records
-                .iter()
-                .filter(|((s, _), _)| *s == system)
-                .flat_map(|(_, records)| records)
-                .map(|record| record.epoch)
-                .max_by(f64::total_cmp)?;
+            let newest = newest_epoch(snapshot, system)?;
             (now - newest > SNAPSHOT_LAG_NOTE_S).then(|| {
                 format!(
                     "broadcast snapshot: the newest {} record is {:.0} min older than the build",
@@ -914,6 +933,24 @@ mod tests {
             assert!(sample_offsets(system).iter().all(|dt| dt.abs() <= width));
         }
         assert_eq!(sample_offsets(System::Gps).len(), 49);
+    }
+
+    #[test]
+    fn a_snapshot_must_reach_the_build_for_every_constellation() -> Result<()> {
+        let mut snapshot = Broadcast::default();
+        snapshot.add(&broadcast(1e-4, 5e-9))?;
+        let inside = Instant::parse("2026-09-25T01:59:00Z")?;
+        let outside = Instant::parse("2026-09-25T02:01:00Z")?;
+        ensure_snapshot_reach(&snapshot, inside, &[System::Bds])?;
+        let late = ensure_snapshot_reach(&snapshot, outside, &[System::Bds])
+            .err()
+            .context("an old BeiDou snapshot was accepted")?;
+        assert!(
+            late.to_string()
+                .contains("no BDS record in the 120 min before the build")
+        );
+        assert!(ensure_snapshot_reach(&snapshot, inside, &[System::Bds, System::Gps]).is_err());
+        Ok(())
     }
 
     #[test]

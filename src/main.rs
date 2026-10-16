@@ -272,7 +272,10 @@ fn process(options: Process, at: Instant, source_loading: &Mutex<()>) -> Result<
             &local,
         )
     };
-    let inputs = match loaded {
+    let inputs = match loaded.and_then(|inputs| {
+        build::ensure_snapshot_reach(&inputs.health, at, &common.systems)?;
+        Ok(inputs)
+    }) {
         Ok(inputs) => inputs,
         Err(e) => {
             remove_output(&zip_path)?;
