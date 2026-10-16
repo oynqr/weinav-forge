@@ -27,6 +27,12 @@ const ESA_DAILY: &str = "ftp://gssc.esa.int/gnss/data/daily";
 const ESA_HOURLY: &str = "ftp://gssc.esa.int/gnss/data/hourly";
 const WUHAN_DAILY: &str = "ftp://igs.gnsswhu.cn/pub/gps/data/daily";
 const GALILEO_ALMANAC_CANDIDATES: usize = 3;
+const CELESTRAK_YUMA: &str = "https://celestrak.org/GPS/almanac/Yuma";
+const CELESTRAK_PROVIDER: &str = "celestrak";
+const CELESTRAK_CANDIDATES: usize = 3;
+const SECONDS_PER_WEEK: i64 = 604_800;
+const ALMANAC_WEEKS: i64 = 1024;
+const ALMANAC_LEAD_S: i64 = 7 * 86_400;
 const GALILEO_ISSUE_TOLERANCE_S: i64 = 300;
 const SNAPSHOT_PROVIDER: &str = "esa-hourly";
 const SNAPSHOT_MIN_STATIONS: usize = 12;
@@ -357,6 +363,42 @@ impl<'a> Fetcher<'a> {
             .with_context(|| format!("{role:?} unavailable: {}", errors.join("; ")))
     }
 
+    fn celestrak_almanac(&mut self, at: Instant) -> Result<Source> {
+        let role = Role::GpsAlmanac;
+        let mut candidates = Vec::new();
+        for year in [at.0.year(), at.0.year() - 1] {
+            let index = format!("{CELESTRAK_YUMA}/{year}/");
+            let Ok((_, bytes)) = self.get(&index, role, CELESTRAK_PROVIDER, false) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            for part in text.split(['"', '\'']) {
+                let name = published_file(part);
+                if let Some(applicable) = yuma_applicability(&name, at)
+                    && applicable <= at.gps() + ALMANAC_LEAD_S
+                {
+                    candidates.push((applicable, format!("{index}{name}")));
+                }
+            }
+            if !candidates.is_empty() {
+                break;
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.reverse();
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .take(CELESTRAK_CANDIDATES)
+            .map(|(_, url)| (CELESTRAK_PROVIDER.to_owned(), url))
+            .collect();
+        ensure!(
+            !candidates.is_empty(),
+            "{CELESTRAK_PROVIDER}: no Yuma almanac file in the index"
+        );
+        self.chain(role, &candidates)
+    }
+
     fn broadcast(&mut self, at: Instant) -> Result<Vec<Source>> {
         let mut sources = Vec::new();
         for (required, candidates) in daily_broadcast(at) {
@@ -532,6 +574,15 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         })
                         .collect::<Vec<_>>();
                     sources.push(fetcher.chain(role, &candidates)?);
+                }
+                Role::GpsAlmanac => {
+                    let source = match fetcher.chain(role, &candidates(role, options.at)) {
+                        Ok(source) => source,
+                        Err(error) => fetcher
+                            .celestrak_almanac(options.at)
+                            .with_context(|| format!("{error:#}"))?,
+                    };
+                    sources.push(source);
                 }
                 Role::GalileoAlmanac => {
                     let base = "https://www.gsc-europa.eu/gsc-products/almanac";
@@ -728,6 +779,25 @@ fn snapshot_name(at: Instant) -> String {
         newest.format("%Y%j"),
         newest.hour()
     )
+}
+
+fn yuma_applicability(name: &str, at: Instant) -> Option<i64> {
+    let rest = name
+        .strip_prefix("almanac.yuma.week")?
+        .strip_suffix(".txt")?;
+    let (week, toa) = rest.split_once('.')?;
+    if week.len() != 4 || toa.len() != 6 {
+        return None;
+    }
+    let week: i64 = week.parse().ok()?;
+    let toa: i64 = toa.parse().ok()?;
+    if week >= ALMANAC_WEEKS || toa >= SECONDS_PER_WEEK {
+        return None;
+    }
+    let current = at.gps() / SECONDS_PER_WEEK;
+    let full = current + (week - current + ALMANAC_WEEKS / 2).rem_euclid(ALMANAC_WEEKS)
+        - ALMANAC_WEEKS / 2;
+    Some(full * SECONDS_PER_WEEK + toa)
 }
 
 fn published_file(url: &str) -> String {
@@ -1182,6 +1252,92 @@ mod tests {
         );
         let early = Instant::parse("2026-10-01T09:30:00Z")?;
         assert!(fetcher.newest_galileo_almanac(&urls, early).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn yuma_names_resolve_the_ten_bit_week_near_the_build() -> Result<()> {
+        let at = Instant::parse("2026-10-16T08:00:00Z")?;
+        let week = at.gps() / SECONDS_PER_WEEK;
+        assert_eq!(week % ALMANAC_WEEKS, 392);
+        assert_eq!(
+            yuma_applicability("almanac.yuma.week0393.061440.txt", at),
+            Some((week + 1) * SECONDS_PER_WEEK + 61_440)
+        );
+        assert_eq!(
+            yuma_applicability("almanac.yuma.week0392.589824.txt", at),
+            Some(week * SECONDS_PER_WEEK + 589_824)
+        );
+        let rollover = Instant::from_gps((week - 392 + ALMANAC_WEEKS) * SECONDS_PER_WEEK)?;
+        assert_eq!(
+            yuma_applicability("almanac.yuma.week1023.589824.txt", rollover),
+            Some((week - 392 + ALMANAC_WEEKS - 1) * SECONDS_PER_WEEK + 589_824)
+        );
+        assert_eq!(
+            yuma_applicability("almanac.yuma.week0000.061440.txt", rollover),
+            Some((week - 392 + ALMANAC_WEEKS) * SECONDS_PER_WEEK + 61_440)
+        );
+        for name in [
+            "almanac.sem.week0393.061440.txt",
+            "almanac.yuma.week393.061440.txt",
+            "almanac.yuma.week0393.604800.txt",
+            "almanac.yuma.week1024.061440.txt",
+            "almanac.yuma.week0393.061440.al3",
+        ] {
+            assert_eq!(yuma_applicability(name, at), None, "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn celestrak_gives_the_newest_yuma_file_that_is_not_ahead_of_the_build() -> Result<()> {
+        let at = Instant::parse("2026-10-16T08:00:00Z")?;
+        let yuma = b"******** Week 393 almanac for PRN-01 ********\nID:                         01\nEccentricity:               0.1718759537E-001\n";
+        let names = [
+            "almanac.yuma.week0392.589824.txt",
+            "almanac.yuma.week0393.061440.txt",
+            "almanac.yuma.week0394.061440.txt",
+        ];
+        let index: String = names
+            .iter()
+            .map(|name| format!("<a href=\"/GPS/almanac/Yuma/2026/{name}\">{name}</a><br>"))
+            .collect();
+        let root = tempfile::tempdir()?;
+        let index_url = format!("{CELESTRAK_YUMA}/2026/");
+        offline_copy(root.path(), &index_url, Role::GpsAlmanac, index.as_bytes())?;
+        for name in &names[..2] {
+            offline_copy(
+                root.path(),
+                &format!("{index_url}{name}"),
+                Role::GpsAlmanac,
+                yuma,
+            )?;
+        }
+        let mut fetcher = offline_fetcher(root.path());
+        let source = fetcher.celestrak_almanac(at)?;
+        assert_eq!(source.provider, CELESTRAK_PROVIDER);
+        assert_eq!(source.url, format!("{index_url}{}", names[1]));
+        let earlier = Instant::parse("2026-10-11T00:00:00Z")?;
+        let source = offline_fetcher(root.path()).celestrak_almanac(earlier)?;
+        assert_eq!(source.url, format!("{index_url}{}", names[0]));
+        let january = tempfile::tempdir()?;
+        let previous_year = format!("{CELESTRAK_YUMA}/2025/");
+        let last = "almanac.yuma.week0351.589824.txt";
+        offline_copy(
+            january.path(),
+            &previous_year,
+            Role::GpsAlmanac,
+            format!("<a href=\"/GPS/almanac/Yuma/2025/{last}\">{last}</a>").as_bytes(),
+        )?;
+        offline_copy(
+            january.path(),
+            &format!("{previous_year}{last}"),
+            Role::GpsAlmanac,
+            yuma,
+        )?;
+        let new_year = Instant::parse("2026-01-01T06:00:00Z")?;
+        let source = offline_fetcher(january.path()).celestrak_almanac(new_year)?;
+        assert_eq!(source.url, format!("{previous_year}{last}"));
         Ok(())
     }
 

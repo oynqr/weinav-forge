@@ -33,6 +33,7 @@ pub fn refused_connection(cause: &(dyn std::error::Error + 'static)) -> bool {
 enum Endpoint {
     Config,
     Agnss,
+    Browser,
     Other,
 }
 
@@ -43,11 +44,12 @@ impl Endpoint {
                 Self::Config
             }
             Some("geo-dre.platform.dbankcloud.com") => Self::Agnss,
+            Some("www.navcen.uscg.gov" | "navcen.uscg.gov") => Self::Browser,
             _ => Self::Other,
         }
     }
 
-    fn headers(self) -> Result<(HeaderMap, OrigHeaderMap)> {
+    fn headers(self) -> Result<(HeaderMap, Option<OrigHeaderMap>)> {
         let mut headers = HeaderMap::new();
         let mut order = OrigHeaderMap::new();
         let mut insert = |name: &'static str, value: &str| -> Result<()> {
@@ -64,6 +66,10 @@ impl Endpoint {
                 insert("X-Device-Type", "SportsHealth")?;
                 insert("X-Request-ID", &uuid::Uuid::new_v4().to_string())?;
                 insert("Content-Type", "application/json")?;
+            }
+            Self::Browser => {
+                insert("Accept-Encoding", "gzip")?;
+                return Ok((headers, None));
             }
             Self::Other => {}
         }
@@ -82,7 +88,7 @@ impl Endpoint {
             headers.insert("User-Agent", HeaderValue::from_static(HUAWEI_USER_AGENT));
             order.insert("User-Agent");
         }
-        Ok((headers, order))
+        Ok((headers, Some(order)))
     }
 }
 
@@ -118,6 +124,14 @@ fn builder() -> ClientBuilder {
         .referer(false)
 }
 
+fn browser_emulation() -> Emulation {
+    wreq_util::Emulation::builder()
+        .profile(wreq_util::Profile::Firefox151)
+        .platform(wreq_util::Platform::Linux)
+        .build()
+        .into_emulation()
+}
+
 fn huawei_builder() -> ClientBuilder {
     builder()
         .emulation(huawei_emulation())
@@ -129,6 +143,7 @@ fn huawei_builder() -> ClientBuilder {
 pub struct Client {
     runtime: Runtime,
     huawei: wreq::Client,
+    browser: wreq::Client,
     other: wreq::Client,
 }
 
@@ -145,10 +160,12 @@ impl Client {
             .enable_all()
             .build()?;
         let huawei = huawei_builder().build()?;
+        let browser = builder().emulation(browser_emulation()).build()?;
         let other = builder().build()?;
         Ok(Self {
             runtime,
             huawei,
+            browser,
             other,
         })
     }
@@ -176,16 +193,16 @@ impl Client {
                 "invalid HTTP destination"
             );
             let endpoint = Endpoint::from_url(&destination);
-            let client = if endpoint == Endpoint::Other {
-                &self.other
-            } else {
-                &self.huawei
+            let client = match endpoint {
+                Endpoint::Other => &self.other,
+                Endpoint::Browser => &self.browser,
+                Endpoint::Config | Endpoint::Agnss => &self.huawei,
             };
             let (headers, order) = endpoint.headers()?;
-            let mut request = client
-                .get(destination.as_str())
-                .headers(headers)
-                .orig_headers(order);
+            let mut request = client.get(destination.as_str()).headers(headers);
+            if let Some(order) = order {
+                request = request.orig_headers(order);
+            }
             if destination.origin() == url.origin() {
                 if let Some(etag) = etag {
                     request = request.header("If-None-Match", etag);

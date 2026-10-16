@@ -326,6 +326,16 @@ is not more than 5 minutes after the build. Thus a replay of an earlier build
 gets the same almanac, and a file with a wrong date cannot win. On 11 October
 2026, the file ``2026-10-09.xml`` had the almanac of 1 October.
 
+The GPS almanac comes from the NAVCEN file ``current_yuma.alm``. NAVCEN
+refuses requests without a web browser user agent, so the fetcher sends
+requests to NAVCEN with the Firefox 151 profile of ``wreq-util`` on Linux.
+When NAVCEN is not available, the fetcher reads the CelesTrak Yuma index of
+the build year, or of the year before if that index has no file. CelesTrak
+keeps copies of the NAVCEN files. The fetcher uses the three newest files
+whose time of applicability is not more than 7 days after the build, in that
+order. The almanac check accepts the same 7 days. The 10-bit week in the file
+name is taken as the week nearest to the build.
+
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
 Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
 role, for the build day or else for the day before. A file without the
