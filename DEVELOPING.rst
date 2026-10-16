@@ -19,12 +19,11 @@ build the static executable. The CI workflow checks ``x86_64-linux`` and
 ``aarch64-linux`` on separate runners. A local flake check builds the checks
 for the host system.
 
-Cargo and Nix use the release profile in ``Cargo.toml``. The standard-library
-``optimize_for_size`` feature does not override this profile. Keep ``-lgcc``
-in the Nix link flags: mimalloc's C code needs GCC integer runtime helpers.
+Cargo and Nix use the release profile in ``Cargo.toml``. Keep ``-lgcc`` in
+the Nix link flags: mimalloc's C code needs GCC integer runtime helpers.
 
 Normal Rust tests use synthetic data and local servers. They do not need
-access to source providers.
+network access.
 
 Cargo forbids unsafe Rust code in all targets of this package, including
 tests. An ``allow`` attribute cannot override this rule.
@@ -40,23 +39,25 @@ Extract its ``fixtures`` directory and run:
   WEINAV_FIXTURES=/path/to/fixtures nix develop -c \
     cargo test --test fixtures -- --ignored
 
-These tests check seed and EXTRA data against captured bytes. They also
-check RTCM field encoding and decoding, and rejection of invalid QZSS data.
-Normal test runs skip these tests. Use the command above to run them.
+Other ignored tests need the reviewed seed, broadcast snapshot and
+``missing_vs_huawei.csv`` of the generation 3 review. Set
+``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. Normal
+test runs skip all of these tests.
 
-Other ignored tests use the reviewed seed, broadcast snapshot and
-``missing_vs_huawei.csv`` from the generation 3 review. Set
-``WEINAV_REVIEW_FIXTURES`` to that directory and run the same command. These
-tests check that the 47 formerly dropped seed records fit inside the
-measured envelope without bounds. They also compare a build with Huawei's
-output: the GPS, Galileo, BeiDou and QZSS files contain records for the same
-satellites and epochs as Huawei's, GPS records agree within 0.15 metre for 2
-hours on each side of the epoch, and no field is on its vendor limit unless
-Huawei's field is. GLONASS records are identical to Huawei's, except for
-satellites that broadcast marks unhealthy. The GPS file also passes the
-Keplerian motion checks of the external validator: the node drift error must
-be at most 1e-5 radian. A second build compares the same files at a time when
-the seed flags an arc of R15, C06 and C09.
+Field envelopes
+---------------
+
+``src/envelopes.rs`` is made from the external gate's ``g2_envelopes.json``.
+Before each build, set ``WEINAV_GATE_ENVELOPES`` to that file and run:
+
+.. code-block:: bash
+
+  WEINAV_GATE_ENVELOPES=/path/to/g2_envelopes.json nix develop -c \
+    cargo test --test fixtures -- --ignored --exact envelopes_match_the_gate
+
+When the test fails, it writes the new table to ``target/tmp/envelopes.rs``.
+Copy that file to ``src/envelopes.rs`` and run ``cargo fmt``. Do not change a
+limit by hand.
 
 Processing performance
 ----------------------
@@ -96,9 +97,7 @@ This checks the static executable with its own math library.
 
 Set ``--threads 1`` for a single-thread comparison. For parallel builds,
 select enough CPUs with ``taskset`` and use the same thread limit in both
-commands. Also measure peak memory for a variant list: each active variant
-keeps its own source data. Source loading is serial to limit temporary
-memory use. Orbit calculations and variants share one worker pool.
+commands. Also measure peak memory for a variant list.
 
 The batch comparison test needs a cache with Huawei and Huawei-plus sources.
 The three-system Huawei-plus build must pass its checks at the selected
@@ -133,12 +132,20 @@ gate results. Test nearly circular orbits, fixed QZSS mean motion and each
 available SIMD level. Keep acceptance limits unchanged during optimization.
 Measure peak resident memory when you change the allocator.
 
+HTTP tests
+----------
+
+The HTTP tests use local servers. Run them with:
+
+.. code-block:: bash
+
+  nix develop -c cargo test http::tests
+
 NixOS tests
 -----------
 
 The NixOS checks evaluate module options and run a VM with controlled source
-responses. The VM test checks service permissions, offline builds,
-compression, HTTP responses, failed updates, expiry and reboot recovery:
+responses:
 
 .. code-block:: bash
 
@@ -187,297 +194,16 @@ with Prettier. CI runs this check. Run it locally with:
 
   nix build .#checks.x86_64-linux.documentation
 
-Huawei HTTP profile
--------------------
-
-The HTTP client is wreq. The Huawei profile starts from the wreq-util
-OkHttp 3.14 profile. Its reference is the patched NetworkKit OkHttp 3.14.9
-client in Huawei Health 16.1.6.320, described in the supplied ``CLIENT.md``.
-Some header bindings are inferred. Android TLS details and the active
-HMS Core version are unknown, so the profile is an approximation.
-
-Keep the profile in ``src/http.rs`` specific to Huawei hosts. Each redirect
-must select the profile for its destination and each request must have a
-fresh request ID. Keep certificate checks enabled.
-
-Local server tests check the actual TLS ClientHello, HTTP/2 frames, and
-HTTP/1 header case and order. Other tests check fresh request IDs, header
-selection after redirects, and separate HTTP and AGNSS gzip layers. Run
-these tests with ``nix develop -c cargo test http::tests``.
-
-Source cache and processing
----------------------------
-
-The cache contains immutable source objects, URL metadata, and one JSON
-manifest per flavor. A complete fetch replaces the manifest atomically.
-Processing checks the content hash of each cached object. The report and ZIP
-are each written through a temporary file.
-
-The processor checks the data format, satellite counts, time coverage and
-source policy before packing. ANTEX corrections use the satellite's radial
-phase-centre offset; transverse antenna offsets are not modelled. The
-quantised orbit check computes the fit's standard error again from the
-encoded record, and permits 0.5 metre beyond the configured fit limit.
-Nearly circular orbits use numerical derivatives because the analytic
-coordinate conversion divides by eccentricity. Without a seed, the validity
-window of the partial EXTRA file starts at the 2-hour grid step that contains
-the build time and ends 75 hours later, so it brackets every shipped epoch.
-
-Each Kepler record is fitted to 49 positions from 2 hours before to 2 hours
-after the epoch, every 300 seconds, as Huawei's library does. A prediction
-source is used for an epoch only when it covers all 49 positions; otherwise the
-epoch is past the source's horizon. The fit limit applies to the standard
-error, which divides the squared residuals by ``3n - 15``. The builder never
-bounds or clamps a field. A record with a field outside its vendor range is
-removed, and the report lists it. Huawei omits the same BeiDou GEO and QZSS
-records. Fields are rounded to nearest, with ties away from zero. A BeiDou
-orbit near 42164 km with an inclination below 10 degrees is a GEO orbit and
-uses the extra rotation of the BeiDou ICD. BeiDou records use the GPS gravity
-constant, as Huawei's records do; broadcast evaluation keeps the ICD value.
-Records carry zero ``gamma_n`` and ``af2``, as genuine Huawei files do. BeiDou
-prediction clocks have a common offset that drifts against the seed. The
-builder removes the median offset against the seed in each epoch, or against
-broadcast when there is no seed, and reports it as ``clock_alignment_ns``.
-
-The measured field envelopes in ``src/envelopes.rs`` are the ``env_min`` and
-``env_max`` limits of the external gate's ``g2_envelopes.json``, multiplied by
-the field scale. Fields without an envelope there use their storage range.
-``GATE_SHA256`` holds the SHA-256 of that file, and each report gives it as
-``envelopes_sha256``, also when the build is refused or a source is not
-available. Set ``WEINAV_GATE_ENVELOPES`` to the file and run the ignored test
-``envelopes_match_the_gate`` before each build. The test makes the table again
-from the file: each field that is not of the ``exact`` class and is not a tag,
-in record order, with the ``env_min`` and ``env_max`` limits, or else the
-storage limits, multiplied by the builder's own field scale. When the result
-is different from ``src/envelopes.rs``, the test fails and writes the new table
-to ``target/tmp/envelopes.rs``. Copy that file to ``src/envelopes.rs`` and run
-``cargo fmt``. The report lists a Kepler record that is outside an envelope in
-``envelope_removals``, not in ``removals``. Such a record needs a comparison
-with Huawei's output and, if it is genuine, a change of the gate's corpus.
-Do not change a limit only to keep the record. The GLONASS records do not get
-this check when they are made. The gate of the builder checks them, and a
-GLONASS record outside an envelope therefore refuses the whole flavor. This
-fails closed, and genuine GLONASS records have not come near the limits.
-
-Seed arcs with the flag set are not used. A Kepler record is removed when one
-of its fit samples falls in such an arc, and a GLONASS record when its time
-does. Each satellite's orbit is compared with broadcast at the build time.
-When the seed arc at that time has the flag set, that comparison uses the
-flagged arc, which no record uses. A satellite that the seed marks unhealthy
-is removed there, also when its arc has the flag set. Each epoch of the report
-gives the distance of each kept satellite in ``screen_distances_m``. The
-report notes a broadcast health snapshot whose newest GPS or GLONASS record is
-more than 45 minutes older than the build, because such a file can be stale.
-When the newest record of a requested constellation in the health snapshot
-is more than 2 hours older than the build, the processor exits with the
-source-unavailable status. The health screen of the external gate reaches
-only 2 hours, so the gate would refuse such a build.
-
-The last broadcast source file is the broadcast health snapshot. Health
-screening uses the newest fresh record in this file only, so the external
-gate can repeat each decision from the published file. The processor writes
-a copy of this file next to the report only when the checks pass. Orbit
-screening and AGNSS use all broadcast files. In the health screen and in the
-orbit comparison at the build time, each Galileo navigation message, I/NAV or
-F/NAV, gives a record, as in the external gate. The two messages of one data
-set give the same orbit. Values that differ between them, such as clock and
-group delay, come from F/NAV records only. A merged file can have more than
-one copy of a satellite's record at one epoch. When one copy is unhealthy or
-has no health value, all records of that satellite at that epoch are
-unhealthy, as in the external gate. This applies to all broadcast files.
-The daily file of the day before is required. The daily file of the build day
-is used when BKG has published it: early in the UTC day it does not exist
-yet, and ``brdc_last.rnx.Z`` then gives the last 24 hours.
-
-BKG was not available from 7 October 2026. For the day before, the fetcher
-then tries the DLR ``BRDM00DLR_S`` file and the IGS ``BRDC00IGS_R`` file, each
-from the ESA server and then from the Wuhan server. When ``brdc_last.rnx.Z``
-is not available, the fetcher makes the health snapshot from the ESA hourly
-broadcast files of 30 stations for the two hours before the hour of the build.
-The stations are in Asia and the Pacific for BeiDou and on all continents for
-the other constellations. The merge keeps RINEX 3 files only. It writes each
-record in RINEX 3.04 form, with 31 values, or 15 for GLONASS, with a blank
-value as 0 and with ``E`` exponents. It removes records that are the same and
-sorts the records. Thus the same station files always give the same snapshot.
-A record with lines that are missing is removed. A record with a blank health
-value is also removed, because 0 is the value for healthy. The header has a
-comment for each station file with its name and the start of its SHA-256. At
-least 12 stations must have records, or the snapshot is not available. The
-source URL is ``merge:esa-hourly/brdc_stations_YYYYDDD_HH.rnx``, with the newer
-hour; its last part is the name of the published health file. The report
-gives a note for each ``broadcast`` or ``ionosphere`` source that replaces a
-BKG file. In the builds of 11 October 2026, the merged snapshot had records
-of 52 to 60 station files, and the O1 screen of the external gate compared 35
-BeiDou satellites.
-
-The ``ionosphere`` role uses the same DLR and IGS files of the day before
-after the two EUREF files. Their header has a ``GAL`` line with three values,
-which the parser ignores. When a connection to a host fails at each attempt
-of one URL, the fetcher does not try that host again in the same fetch. A
-file that is missing does not stop the use of its host. One host gives all
-station files of the snapshot. Thus two failed connections for one station
-file stop the snapshot. ESA and Wuhan give these files by FTP only: on 16
-October 2026 the ESA web server gave status 404 for the same paths, and the
-Wuhan and IGN servers did not accept HTTPS connections.
-
-The GSC almanac page lists files by a date in their name. The fetcher gets
-the three newest files and uses the one with the newest ``issueDate`` that
-is not more than 5 minutes after the build. Thus a replay of an earlier build
-gets the same almanac, and a file with a wrong date cannot win. On 11 October
-2026, the file ``2026-10-09.xml`` had the almanac of 1 October.
-
-The GPS almanac comes from the NAVCEN file ``current_yuma.alm``. NAVCEN
-refuses requests without a web browser user agent, so the fetcher sends
-requests to NAVCEN with the Firefox 151 profile of ``wreq-util`` on Linux.
-When NAVCEN is not available, the fetcher reads the CelesTrak Yuma index of
-the build year, or of the year before if that index has no file. CelesTrak
-keeps copies of the NAVCEN files. The fetcher uses the three newest files
-whose time of applicability is not more than 7 days after the build, in that
-order. The almanac check accepts the same 7 days. The 10-bit week in the file
-name is taken as the week nearest to the build.
-
-Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
-Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
-role, for the build day or else for the day before. A file without the
-``GPSA`` and ``GPSB`` header lines is not available, and the fetcher then
-tries the day before. Early in the UTC day, the file of the build day has no
-such header. The builder reads only the Klobuchar coefficients from this
-file, not its records: its GR50 writer gives Galileo records an epoch that is
-not their ``toc``, and its GLONASS health differs from the health snapshot.
-AGNSS from broadcast and the partial EXTRA file use these coefficients. When
-the file is absent, they use the seed's ``gpsIon`` coefficients, if there is
-a seed. The seed's coefficients were two days older than their seed version
-when measured, and the header file is from the build day or the day before,
-so the header file comes first. When neither is available, message 4056 is
-absent. The report gives the source as ``klobuchar``: its provider, URL,
-SHA-256, the day of the daily file and the eight raw coefficients, or null.
-AGNSS from broadcast uses, for each satellite, the healthy record whose
-``toe`` is nearest to the build time, within 2 hours. It does not select by
-the RINEX epoch, because a Galileo record can have an epoch that is not its
-``toc``. For Galileo, only F/NAV records are used, as in Huawei's stream.
-The AGNSS check refuses a GLONASS ``t_b`` more than 30 minutes from the build
-time, a BeiDou ``toe`` more than 90 minutes away and a GPS ``toe`` more than
-2 hours away, in absolute time, as the external gate does. It also refuses a
-Galileo ``toe`` more than 4 hours away, which the external gate does not check,
-and a stream without a GPS ephemeris. Huawei's Galileo week and GLONASS day
-number are unreliable: Huawei's stream has carried the next Galileo week, and
-a GLONASS day from 8 days behind to 1 day ahead. For Huawei's AGNSS, the check
-therefore accepts those two fields within these bounds, and the report gives
-the number of such messages for each size of the difference; the time of week
-and the time of day must still be current. The external gate reads neither
-field. The week of GPS message 1019 is the week in which the transmission of
-the data set started. A data set
-with a ``toe`` at the start of a week is transmitted from 2 hours before, and
-Huawei's stream then gives it the old week. For Huawei's AGNSS, the check
-therefore accepts the week before for a ``toe`` less than 2 hours into the
-week, as the external gate does, when both of these conditions are true:
-
-- a BeiDou ephemeris, or a GPS ephemeris with a ``toe`` 2 hours or more from
-  each end of the week, dates the stream;
-- no other GPS ephemeris has a ``toe`` of 0 with its own week, or, before the
-  new week starts, a ``toe`` less than 2 hours into the next week with that
-  week.
-
-The report notes the number of such messages. The builder writes the week of
-the ``toe``, and the check of the builder's own stream accepts only that week.
-
-When the builder makes AGNSS from broadcast, it omits each GLONASS ephemeris
-whose ``t_b`` is more than 30 minutes from the build time, and each BeiDou
-ephemeris whose ``toe`` is more than 90 minutes from the build time. These are
-the limits of the AGNSS check. BKG publishes each new GLONASS ``t_b`` a few
-minutes late, and each hourly BeiDou data set 10 to 25 minutes after its
-``toe``. In the open builds of 26 and 27 September 2026, the GLONASS ``t_b``
-was 8 to 29 minutes old and the BeiDou ``toe`` 55 to 74 minutes old. Thus a
-late publication can make a whole constellation stale, and the omission then
-keeps the other constellations instead of refusing the build. The report
-counts the omitted ephemerides in ``agnss_glonass_omitted`` and
-``agnss_bds_omitted``, which are null when the AGNSS does not come from
-broadcast. When every ephemeris of one of these constellations is between its
-limit and 2 hours old, the stream carries none of that constellation. When no
-healthy ephemeris of the constellation is within 2 hours, the build is
-refused, because the broadcast source is then broken rather than late. Each
-build fetches the broadcast files again. The fetcher reuses a cached URL for at
-most 2 minutes, so a snapshot never carries over to the next regeneration.
-
-The report uses the ``gb-gnss-zipbuilder/report/1`` format. The gate reads
-the ``format``, ``flavor``, ``built_at_unix``, ``seed``, ``health``,
-``plan`` and ``degraded`` report fields; the other fields are for diagnosis.
-``seed`` names the seed version, and ``plan`` names the source for each
-constellation and epoch range. The internal source policy is under
-``policy``.
-
-Service publication
--------------------
-
-The fetch service gets the combined source data needed by enabled instances.
-The build service has no network access and reads the cache through a
-read-only mount. The services use separate dynamic users. A shared lock
-prevents fetching, building and cleanup from running at the same time.
-
-Tmpfiles manages shared storage independently of the dynamic users. Fixed
-groups and default access control lists give each service the required
-access. Keep the top directories and lock file owned by root. Workers must
-not be able to replace the lock or change top-directory permissions. These
-restrictions prevent access by a later account with a reused UID. Nginx must
-not be able to write published files or read private cache files and reports.
-The VM test checks these restrictions after forced UID changes.
-
-Each build first writes private staging files. It then makes gzip and Brotli
-sidecars with ``pigz`` and ``brotli``, and checks both by decompression.
-It keeps a sidecar only if its size is less than the original file size.
-This rule applies to ZIP files, reports and the discovery manifest,
-including sidecars from earlier publications.
-The completed set moves to a generation directory on the output filesystem.
-A single atomic link replacement publishes the set.
-
-Build ``manifest.json`` from published metadata, not the current instance
-settings: an instance can still serve an older build after an update fails.
-Keep original timestamps and use URLs for specific generations so checksums
-remain valid across updates. Publish the manifest and its sidecars through
-their own atomic link. Publish each passed report and its broadcast health
-snapshot in the generation directory, because the external gate needs both.
-Check the snapshot checksum against the report before publication. Keep the
-seed, the other source data and the private report copies private.
-
-Cleanup must keep each current generation and every generation named in the
-current manifest. Failed updates and reboots must keep the previous output,
-even after its timestamp expires. Cache cleanup must keep objects referenced
-by a committed source manifest or current URL metadata.
-
 Dependency updates
 ------------------
 
-Dependabot checks Cargo, Nix flake inputs and GitHub Actions each Monday at
-03:27 UTC. The ``dependencies`` group combines their version updates in one
-pull request. The configuration is in ``.github/dependabot.yml``.
-Cargo version updates wait two days after release, include indirect
-dependencies, and change only ``Cargo.lock``.
-External actions must use full commit pins.
+The Dependabot configuration is in ``.github/dependabot.yml``. Keep its Cargo
+cooldown equal to the publication age in ``.cargo/config.toml``. External
+actions must use full commit pins.
 
 Enable Dependabot alerts and security updates in the repository settings.
-Cargo security updates use the separate ``cargo-security`` group. They do
-not wait for the weekly version update schedule or the two-day cooldown.
-
-The ``merge dependency updates`` workflow runs after the build workflow.
-It checks the Dependabot author and each commit signature. It permits
-changes to ``Cargo.lock``, ``flake.lock`` and action pins only.
-Changes to other files, including ``Cargo.toml``, need manual review.
-
-For ordinary Cargo updates, the merge check reads the publication age from
-the base branch's ``.cargo/config.toml``. It checks each new package version
-against crates.io, including indirect dependencies. Keep the Cargo cooldown
-in ``.github/dependabot.yml`` equal to this age. A signed commit with the
-``cargo-security`` group is exempt from the age check. The build, test and
-lint checks still apply.
-
-The workflow advances the default branch by fast-forward only. This keeps
-the signed Dependabot commits unchanged. Both tested branches must still be
-current, and repository rules must permit the update. No pull request code
-runs in the merge workflow.
-
-The merge checks and fast-forward use the built-in ``GITHUB_TOKEN``.
-The token needs permission to update the default branch by fast-forward.
-Require the build and lint checks in the branch rules.
+Give the built-in ``GITHUB_TOKEN`` permission to update the default branch by
+fast-forward. Require the build and lint checks in the branch rules.
 
 For rebase comments, create a fine-grained personal access token from a
 user account with push access to this repository. Select only this
@@ -486,18 +212,8 @@ GitHub adds ``Metadata: Read-only`` permission. Save the token as the
 ``DEPENDABOT_REBASE_TOKEN`` Actions repository secret. Use an Actions
 secret, not a Dependabot secret. Replace it before it expires.
 
-If the base branch advances or the checked branch needs a rebase, the
-workflow posts ``@dependabot rebase`` and leaves the pull request open.
-It uses the personal token only to identify the user and post the comment.
-It sends at most one request from that user for each head and base revision
-pair. Old requests from ``github-actions[bot]`` do not prevent a new request.
-Dependabot must update the branch and the new build must pass before a
-merge can occur. If the secret is absent or invalid, a required rebase
-fails the workflow. A pull request that needs no rebase can still merge.
-
-If a merge fails for another reason, read the workflow log. If a package is
-too new, rerun the failed merge job after the age limit. A failed
-publication lookup leaves the pull request open.
+If a merge fails, read the workflow log. If a package is too new, rerun the
+failed merge job after the age limit.
 
 To update the lock files locally, run:
 
