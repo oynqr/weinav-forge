@@ -314,7 +314,11 @@ The ``ionosphere`` role uses the same DLR and IGS files of the day before
 after the two EUREF files. Their header has a ``GAL`` line with three values,
 which the parser ignores. When a connection to a host fails at each attempt
 of one URL, the fetcher does not try that host again in the same fetch. A
-file that is missing does not stop the use of its host.
+file that is missing does not stop the use of its host. One host gives all
+station files of the snapshot. Thus two failed connections for one station
+file stop the snapshot. ESA and Wuhan give these files by FTP only: on 16
+October 2026 the ESA web server gave status 404 for the same paths, and the
+Wuhan and IGN servers did not accept HTTPS connections.
 
 The GSC almanac page lists files by a date in their name. The fetcher gets
 the three newest files and uses the one with the newest ``issueDate`` that
