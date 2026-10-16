@@ -27,6 +27,7 @@ const ESA_DAILY: &str = "ftp://gssc.esa.int/gnss/data/daily";
 const ESA_HOURLY: &str = "ftp://gssc.esa.int/gnss/data/hourly";
 const WUHAN_DAILY: &str = "ftp://igs.gnsswhu.cn/pub/gps/data/daily";
 const GALILEO_ALMANAC_CANDIDATES: usize = 3;
+const GALILEO_ISSUE_TOLERANCE_S: i64 = 300;
 const SNAPSHOT_PROVIDER: &str = "esa-hourly";
 const SNAPSHOT_MIN_STATIONS: usize = 12;
 const SNAPSHOT_HOURS_BACK: [i64; 2] = [1, 2];
@@ -321,16 +322,24 @@ impl<'a> Fetcher<'a> {
         bail!("{role:?} unavailable: {}", errors.join("; "))
     }
 
-    fn newest_galileo_almanac(&mut self, urls: &[String]) -> Result<Source> {
+    fn newest_galileo_almanac(&mut self, urls: &[String], at: Instant) -> Result<Source> {
         let role = Role::GalileoAlmanac;
         let provider = provider(role);
+        let latest = at.0 + chrono::Duration::seconds(GALILEO_ISSUE_TOLERANCE_S);
         let mut newest: Option<(Instant, Source)> = None;
         let mut errors = Vec::new();
         for url in urls {
             match self
                 .get(url, role, provider, true)
-                .and_then(|(source, bytes)| Ok((crate::almanac::galileo_issue(&bytes)?, source)))
-            {
+                .and_then(|(source, bytes)| {
+                    let issue = crate::almanac::galileo_issue(&bytes)?;
+                    ensure!(
+                        issue.0 <= latest,
+                        "{url}: issued at {}, after the build",
+                        issue.0.to_rfc3339()
+                    );
+                    Ok((issue, source))
+                }) {
                 Ok((issue, source)) => {
                     if newest.as_ref().is_none_or(|(best, _)| issue.0 > best.0) {
                         newest = Some((issue, source));
@@ -553,7 +562,7 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                         .take(GALILEO_ALMANAC_CANDIDATES)
                         .map(|(_, url)| url)
                         .collect();
-                    sources.push(fetcher.newest_galileo_almanac(&urls)?);
+                    sources.push(fetcher.newest_galileo_almanac(&urls, options.at)?);
                 }
                 Role::Broadcast => sources.extend(fetcher.broadcast(options.at)?),
                 Role::Ionosphere => sources.extend(fetcher.klobuchar_header(options.at)),
@@ -1154,14 +1163,25 @@ mod tests {
             b"<signalData/>",
         )?;
         let mut fetcher = offline_fetcher(root.path());
-        assert_eq!(fetcher.newest_galileo_almanac(&urls)?.url, urls[1]);
+        let at = Instant::parse("2026-10-11T00:00:00Z")?;
+        assert_eq!(fetcher.newest_galileo_almanac(&urls, at)?.url, urls[1]);
         assert!(
             fetcher
                 .attempts
                 .iter()
                 .any(|a| a.contains("Galileo issue date missing"))
         );
-        assert!(fetcher.newest_galileo_almanac(&urls[3..]).is_err());
+        assert!(fetcher.newest_galileo_almanac(&urls[3..], at).is_err());
+        let replay = Instant::parse("2026-10-05T00:00:00Z")?;
+        assert_eq!(fetcher.newest_galileo_almanac(&urls, replay)?.url, urls[2]);
+        assert!(
+            fetcher
+                .attempts
+                .iter()
+                .any(|a| a.contains("2026-10-06.xml: issued at 2026-10-06T09:59:59"))
+        );
+        let early = Instant::parse("2026-10-01T09:30:00Z")?;
+        assert!(fetcher.newest_galileo_almanac(&urls, early).is_err());
         Ok(())
     }
 

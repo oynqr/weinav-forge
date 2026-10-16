@@ -317,8 +317,10 @@ of one URL, the fetcher does not try that host again in the same fetch. A
 file that is missing does not stop the use of its host.
 
 The GSC almanac page lists files by a date in their name. The fetcher gets
-the three newest files and uses the one with the newest ``issueDate``. On
-11 October 2026, the file ``2026-10-09.xml`` had the almanac of 1 October.
+the three newest files and uses the one with the newest ``issueDate`` that
+is not more than 5 minutes after the build. Thus a replay of an earlier build
+gets the same almanac, and a file with a wrong date cannot win. On 11 October
+2026, the file ``2026-10-09.xml`` had the almanac of 1 October.
 
 Of BKG's daily broadcast files, only the EUREF ``BRDC00WRD_R`` file has GPS
 Klobuchar coefficients. The fetcher gets that file with the ``ionosphere``
