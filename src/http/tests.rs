@@ -42,6 +42,20 @@ fn gzip(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[test]
+fn body_time_grows_with_the_announced_size() {
+    assert_eq!(body_budget(Some(0)), BODY_MARGIN);
+    assert_eq!(
+        body_budget(Some(9_850_503)),
+        BODY_MARGIN + Duration::from_secs(394)
+    );
+    assert_eq!(
+        body_budget(Some(61_579_571)),
+        BODY_MARGIN + Duration::from_secs(2463)
+    );
+    assert_eq!(body_budget(None), DEFAULT_BODY_TIMEOUT);
+}
+
+#[test]
 fn huawei_headers_redirects_and_gzip_layers() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
