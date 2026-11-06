@@ -812,6 +812,7 @@ fn candidates(role: Role, at: Instant) -> Vec<(String, String)> {
         Role::Prediction=>{
             let mut urls=Vec::new();
             for offset in [0,-1,-2] {let date=day+chrono::Duration::days(offset);urls.push(("code5d".into(),code_prediction_url(date)));}
+            urls.push(("code5d".into(),format!("{CODE_BASE}/COD0OPSPRD_05D.SP3")));
             urls.extend([("code-ult".into(),format!("{CODE_BASE}/COD.EPH_U")),("igs-ult".into(),format!("https://igs.bkg.bund.de/root_ftp/IGS/products/{week}/IGS0OPSULT_{}{:02}00_02D_15M_ORB.SP3.gz",day.format("%Y%j"),day.hour()/6*6))]);
             for offset in 0..3 {
                 let date=day-chrono::Duration::hours(3*offset);
@@ -950,8 +951,13 @@ mod tests {
                 )
             );
         }
+        assert_eq!(urls[3].0, "code5d");
         assert_eq!(
             urls[3].1,
+            "https://zhw-b.s3.cloud.switch.ch/aiub/CODE/COD0OPSPRD_05D.SP3"
+        );
+        assert_eq!(
+            urls[4].1,
             "https://zhw-b.s3.cloud.switch.ch/aiub/CODE/COD.EPH_U"
         );
         Ok(())
