@@ -584,7 +584,7 @@ in
       };
       timeout = mkOption {
         type = types.str;
-        default = "15min";
+        default = "90min";
         description = "Maximum fetch service run time.";
       };
       sourceUrls = mkOption {

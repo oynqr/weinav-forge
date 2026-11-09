@@ -264,7 +264,9 @@ Common options under ``services.weinav-forge`` are:
   ``fitRms`` and ``allowDegraded``.
 * ``fetch.timerConfig``: systemd timer settings. Set ``OnCalendar`` to change
   the schedule. ``fetch.sourceUrls`` sets URL fallback chains by source role.
-* ``fetch.timeout`` and ``build.timeout``: default 15 minutes each.
+* ``fetch.timeout``: default 90 minutes. A first fetch into an empty cache
+  can take this long when the source servers are slow.
+* ``build.timeout``: default 15 minutes.
 * ``build.threads``: processing thread limit shared by all instances,
   default ``null``. This selects the available CPU thread count when the
   service starts. All instances build in one command.
