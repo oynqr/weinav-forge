@@ -220,4 +220,4 @@ To update the lock files locally, run:
 .. code-block:: bash
 
   nix flake update
-  nix develop --no-update-lock-file -c cargo update -Z min-publish-age
+  nix develop --no-update-lock-file -c cargo update
