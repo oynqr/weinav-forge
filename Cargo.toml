@@ -17,7 +17,7 @@ flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 lzw_z = { package = "newtua-lzw-z", version = "0.1" }
-roxmltree = "0.20"
+roxmltree = "0.21"
 wreq = { version = "0.16.1", default-features = false, features = [
   "tokio-rt",
   "webpki-roots",
