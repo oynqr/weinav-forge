@@ -15,7 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-nalgebra = { version = "0.34", default-features = false, features = ["std"] }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 lzw_z = { package = "newtua-lzw-z", version = "0.1" }
 roxmltree = "0.21"
 wreq = { version = "0.16.1", default-features = false, features = [
