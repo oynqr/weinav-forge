@@ -10,7 +10,7 @@ unsafe_code = "forbid"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
