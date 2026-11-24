@@ -46,7 +46,10 @@ pub struct Manifest {
 }
 
 pub fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub fn read(path: &Path) -> Result<Vec<u8>> {

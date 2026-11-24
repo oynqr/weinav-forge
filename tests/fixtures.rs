@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf};
-use weinav_forge::{extra, orbit, policy::System, record, rtcm, seed::Seed};
+use weinav_forge::{cache, extra, orbit, policy::System, record, rtcm, seed::Seed};
 
 #[test]
 #[ignore = "requires the author's reviewed seed and missing-record CSV"]
@@ -1050,7 +1049,7 @@ fn seed_and_extra_match_captured_bytes() -> Result<()> {
     let (extra, notes) = extra::build(&seed)?;
     assert!(notes.is_empty(), "{notes:?}");
     assert_eq!(
-        format!("{:x}", Sha256::digest(&extra)),
+        cache::hash(&extra),
         "f2df9226c8265d76e2685c2388a9b4e7c859c1c830ad264db84e0fe624d0bdc8"
     );
     let other_seed_extra = fixture("HW_PGNSS_EXTRA.sample")?;
@@ -1077,7 +1076,7 @@ fn seed_and_extra_match_captured_bytes() -> Result<()> {
 fn rtcm_roundtrips_every_field_and_frame() -> Result<()> {
     let bytes = fixture("HW_AGNSS_RTCM_33.20260902")?;
     assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
+        cache::hash(&bytes),
         "538892071e29a42eef7c01e63a1918c7c92c05ea59f355a087a7382a5a7cc6d3"
     );
     let mut histogram = BTreeMap::new();
@@ -1180,7 +1179,7 @@ fn envelopes_match_the_gate() -> Result<()> {
     let path = std::env::var_os("WEINAV_GATE_ENVELOPES")
         .context("set WEINAV_GATE_ENVELOPES to the external gate's g2_envelopes.json")?;
     let bytes = fs::read(path)?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = cache::hash(&bytes);
     let expected = generated_envelopes(&serde_json::from_slice(&bytes)?, &sha256)?;
     if expected != table_text(record::envelopes::GATE_SHA256) {
         let generated = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("envelopes.rs");
