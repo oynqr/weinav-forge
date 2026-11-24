@@ -108,6 +108,7 @@ impl Inputs {
                             | Role::BdsPrediction
                             | Role::QzsPrediction
                             | Role::Ionosphere
+                            | Role::GalileoAlmanac
                     ),
                 "required source is absent: {role:?}"
             );
@@ -659,7 +660,11 @@ pub fn assemble(
         let klobuchar = inputs.klobuchar()?;
         let (extra, notes) = crate::almanac::build(
             &inputs.raw[&Role::GpsAlmanac][0],
-            &inputs.raw[&Role::GalileoAlmanac][0],
+            inputs
+                .raw
+                .get(&Role::GalileoAlmanac)
+                .and_then(|raw| raw.first())
+                .map(Vec::as_slice),
             &inputs.broadcast,
             klobuchar.as_ref().map(|(message, _)| message),
             at,

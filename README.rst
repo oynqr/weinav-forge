@@ -123,6 +123,11 @@ from other servers. It then makes the broadcast health file from the hourly
 broadcast files of 30 stations. The report gives a note for each source that
 replaces a BKG file.
 
+The ``open`` flavor gets the Galileo almanac from the European GNSS Service
+Centre (GSC). The tool does not use a GSC almanac that is more than 7 days
+from the build time. If no usable GSC almanac is available, the tool makes the
+Galileo almanac from the broadcast data. The report then gives a note.
+
 Exit status is 0 for success, 2 for a command-line parsing error, 3 when a
 source is unavailable, 4 when output is refused, and 1 for another error.
 

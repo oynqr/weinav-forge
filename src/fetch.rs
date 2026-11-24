@@ -649,6 +649,10 @@ pub fn run(options: Options<'_>) -> Result<Manifest> {
                 fetcher.attempts.push(format!(
                     "{role:?}: whole-grid flavor fallback selected after source failure: {error:#}"
                 ));
+            } else if role == Role::GalileoAlmanac {
+                fetcher.attempts.push(format!(
+                    "{role:?}: broadcast-derived almanac selected after source failure: {error:#}"
+                ));
             } else {
                 return Err(error);
             }
@@ -1258,6 +1262,56 @@ mod tests {
         );
         let early = Instant::parse("2026-10-01T09:30:00Z")?;
         assert!(fetcher.newest_galileo_almanac(&urls, early).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_galileo_almanac_failure_leaves_it_out_of_the_manifest() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let files = tempfile::tempdir()?;
+        let antex = [
+            (String::new(), "START OF ANTENNA"),
+            (format!("{:20}{:20}", "", "G01"), "TYPE / SERIAL NO"),
+            ("G01".into(), "START OF FREQUENCY"),
+            ("0 0 1000".into(), "NORTH / EAST / UP"),
+            (String::new(), "END OF ANTENNA"),
+        ]
+        .into_iter()
+        .map(|(data, label)| format!("{data:60}{label}\n"))
+        .collect::<String>();
+        let mut local = BTreeMap::new();
+        for (role, name, bytes) in [
+            (Role::Broadcast, "broadcast.rnx", navigation("")),
+            (Role::Antex, "igs20.atx", antex.into_bytes()),
+            (
+                Role::GpsAlmanac,
+                "current.alm",
+                b"ID: 1\nEccentricity: 0.01\n".to_vec(),
+            ),
+        ] {
+            let path = files.path().join(name);
+            fs::write(&path, bytes)?;
+            local.insert(role, vec![path]);
+        }
+        let manifest = run(Options {
+            cache: root.path(),
+            flavor: Flavor::Open,
+            systems: &[System::Gps],
+            agnss: false,
+            at: Instant::parse("2026-01-01T00:08:00Z")?,
+            offline: true,
+            local: &local,
+            urls: &BTreeMap::new(),
+        })?;
+        let roles: BTreeSet<_> = manifest.sources.iter().map(|s| s.role).collect();
+        assert_eq!(
+            roles,
+            BTreeSet::from([Role::Broadcast, Role::Antex, Role::GpsAlmanac])
+        );
+        assert!(manifest.attempts.iter().any(|a| {
+            a.starts_with("GalileoAlmanac: broadcast-derived almanac selected")
+                && a.contains("gsc-products/almanac")
+        }));
         Ok(())
     }
 

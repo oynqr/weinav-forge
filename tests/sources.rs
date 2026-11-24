@@ -111,16 +111,23 @@ fn cached_sources_keep_validation_and_local_overrides() -> Result<()> {
             .contains("one ANTEX")
     );
     manifest.sources.pop();
-    let almanac = manifest.sources.pop().unwrap();
+    let galileo_almanac = manifest.sources.pop().unwrap();
+    cache::atomic_write(&path, &serde_json::to_vec(&manifest)?)?;
+    assert!(
+        !load(root, &BTreeMap::new())?
+            .raw
+            .contains_key(&Role::GalileoAlmanac)
+    );
+    let gps_almanac = manifest.sources.pop().unwrap();
     cache::atomic_write(&path, &serde_json::to_vec(&manifest)?)?;
     assert!(
         load(root, &BTreeMap::new())
             .err()
             .unwrap()
             .to_string()
-            .contains("required source is absent")
+            .contains("required source is absent: GpsAlmanac")
     );
-    manifest.sources.push(almanac);
+    manifest.sources.extend([gps_almanac, galileo_almanac]);
     cache::atomic_write(&path, &serde_json::to_vec(&manifest)?)?;
 
     fs::write(
