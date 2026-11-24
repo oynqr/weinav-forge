@@ -818,7 +818,8 @@ fn reviewed_screen_reports_distances_and_the_seed_health_of_flagged_arcs() -> Re
     assert!(
         first
             .removals
-            .contains(&"7: seed satellite is unhealthy".to_string()),
+            .iter()
+            .any(|removal| removal == "7: seed satellite is unhealthy"),
         "{:?}",
         first.removals
     );
